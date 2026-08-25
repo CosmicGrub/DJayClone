@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Import: browsing/opening any audio file on device via SAF -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Legacy fallback for older devices -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- Normal permission (no runtime prompt) - requesting/abandoning audio
+         focus and classifying our streams correctly for routing to whatever
+         output is connected (speaker, wired/Bluetooth headphones, car head
+         units via Android Auto) relies on AudioManager APIs this covers. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Stage 6: recording the live mix. RECORD_AUDIO is required by
+         AudioPlaybackCaptureConfiguration even though no microphone is ever
+         touched - it's the dangerous-permission gate Android puts on any
+         AudioRecord-based capture, self-capture included. The whole feature
+         is gated behind API 29+ at runtime (see RecordingViewModel) - these
+         permissions are simply inert/unused below that on older devices. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- API 33+ only, runtime-requested - gates the "Recording..." status
+         notification's visibility, not the recording itself. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="DJayClone"
+        android:theme="@style/Theme.DJayClone"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.DJayClone">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Lets "Open with" from a file manager / other app send a
+                 track straight to Deck A - also doubles as our test hook. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- Foreground service so MediaProjection-based capture survives the
+             user backgrounding the app mid-recording (Android tears the
+             projection down otherwise). foregroundServiceType="mediaProjection"
+             is required by the OS on API 34, not just best practice. -->
+        <service
+            android:name=".RecordingService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
+    </application>
+</manifest>

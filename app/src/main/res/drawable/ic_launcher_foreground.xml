@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Vinyl record + tonearm accent, matching Turntable.kt's on-screen look
+     (dark disc, groove rings, colored accent tick, colored center label).
+     Kept within the ~66x66dp adaptive-icon safe zone centered in the
+     108x108 viewport so it isn't clipped by launcher icon masks. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Disc body -->
+    <path
+        android:fillColor="#1A1A1E"
+        android:pathData="M24,54 A30,30 0 1,0 84,54 A30,30 0 1,0 24,54 Z" />
+
+    <!-- Groove rings -->
+    <path
+        android:strokeColor="#33383D"
+        android:strokeWidth="0.8"
+        android:pathData="M28,54 A26,26 0 1,0 80,54 A26,26 0 1,0 28,54 Z" />
+    <path
+        android:strokeColor="#2B2F33"
+        android:strokeWidth="0.8"
+        android:pathData="M33,54 A21,21 0 1,0 75,54 A21,21 0 1,0 33,54 Z" />
+
+    <!-- Accent tick, matching the green deck-A tick mark on the on-screen
+         turntable -->
+    <path
+        android:strokeColor="#3DDC97"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M74.5,33.5 L62.5,45.5" />
+
+    <!-- Center label -->
+    <path
+        android:fillColor="#FF5A7A"
+        android:pathData="M43,54 A11,11 0 1,0 65,54 A11,11 0 1,0 43,54 Z" />
+
+    <!-- Spindle hole -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M52,54 A2,2 0 1,0 56,54 A2,2 0 1,0 52,54 Z" />
+</vector>
