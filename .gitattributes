@@ -1,0 +1,13 @@
+# Normalize line endings: store text files with LF in the repo, let Git
+# convert to the platform's native line ending on checkout. Fixes the
+# "LF will be replaced by CRLF" warning every commit in this repo has been
+# printing on Windows.
+* text=auto
+
+# Never touch line endings in binary assets.
+*.jar binary
+*.apk binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
