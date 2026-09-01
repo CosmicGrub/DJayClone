@@ -36,9 +36,18 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     val sort: StateFlow<LibrarySortOrder> = _sort.asStateFlow()
 
     /** Query-filtered (150ms debounced, client-side substring match on
-     * title/artist - not a MediaStore requery per keystroke, viable at this
-     * app's realistic personal-library scale) view of whatever refresh()
-     * last loaded, already sorted by the repository. */
+     * title/artist/key - not a MediaStore requery per keystroke, viable at
+     * this app's realistic personal-library scale) view of whatever
+     * refresh() last loaded, already sorted by the repository.
+     *
+     * Key is matched too (not just title/artist): the whole point of Key
+     * Detection is harmonic mixing, and typing a Camelot code (e.g. "8B")
+     * to pull up every compatible track is a real DJ workflow, not a
+     * hypothetical one - exact match only (equalsIgnoreCase, not
+     * contains()), since "contains" would make searching "1A" also match
+     * "1A" *and* every other single/double-digit code containing "1" as a
+     * substring of a longer number (e.g. "11A", "12A"), which isn't what a
+     * DJ typing a specific Camelot code means. */
     @OptIn(FlowPreview::class)
     val visibleTracks: StateFlow<List<LibraryTrack>> = combine(
         _allTracks,
@@ -48,7 +57,9 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             tracks
         } else {
             tracks.filter {
-                it.title.contains(q, ignoreCase = true) || it.artist?.contains(q, ignoreCase = true) == true
+                it.title.contains(q, ignoreCase = true) ||
+                    it.artist?.contains(q, ignoreCase = true) == true ||
+                    it.camelotKey?.equals(q.trim(), ignoreCase = true) == true
             }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

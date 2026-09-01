@@ -125,7 +125,7 @@ private fun LibraryListContent(
             value = query,
             onValueChange = { library.setQuery(it) },
             modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-            placeholder = { Text("Search title or artist", color = Color.DarkGray) },
+            placeholder = { Text("Search title, artist, or key (e.g. 8B)", color = Color.DarkGray) },
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = Color.Gray) },
             singleLine = true,
             colors = OutlinedTextFieldDefaults.colors(
