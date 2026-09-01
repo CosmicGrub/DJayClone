@@ -45,7 +45,7 @@ sealed class TrackId {
     }
 }
 
-enum class LibrarySortOrder { TITLE, ARTIST, DATE_ADDED, DURATION, BPM }
+enum class LibrarySortOrder { TITLE, ARTIST, DATE_ADDED, DURATION, BPM, KEY }
 enum class Deck { A, B }
 
 data class LibraryTrack(
@@ -56,6 +56,7 @@ data class LibraryTrack(
     val durationMs: Long,
     val dateAddedMs: Long,
     val bpm: Float?,             // from TrackCacheRepository, not a MediaStore column
+    val camelotKey: String?,     // from TrackCacheRepository (KeyDetector's output), not a MediaStore column
     val isManual: Boolean,       // true = SAF-imported supplement, false = MediaStore row
     val isAccessible: Boolean = true, // only ever false for a manual row w/ a revoked SAF grant
 )
@@ -144,6 +145,7 @@ class TrackLibraryRepository(private val app: Application) {
                             durationMs = cursor.getLong(durationIdx),
                             dateAddedMs = cursor.getLong(dateIdx) * 1000L, // DATE_ADDED is seconds, not ms
                             bpm = cache.getCachedBpm(trackId),
+                            camelotKey = cache.getCachedKey(trackId),
                             isManual = false,
                             isAccessible = true,
                         )
@@ -181,6 +183,7 @@ class TrackLibraryRepository(private val app: Application) {
                 durationMs = 0L,
                 dateAddedMs = cache.getManualAddedAt(uriString) ?: 0L,
                 bpm = cache.getCachedBpm(trackId),
+                camelotKey = cache.getCachedKey(trackId),
                 isManual = true,
                 isAccessible = accessible,
             )
@@ -203,5 +206,21 @@ class TrackLibraryRepository(private val app: Application) {
         LibrarySortOrder.DURATION -> compareBy { it.durationMs }
         // Null BPM (not yet analyzed) sorts LAST as a group, never treated as 0.
         LibrarySortOrder.BPM -> compareBy { it.bpm ?: Float.MAX_VALUE }
+        // Same null-sorts-last convention as BPM. Sorts by actual Camelot
+        // wheel position (number, then A before B), not plain string order -
+        // string order would wrongly put "10A" ahead of "2A".
+        LibrarySortOrder.KEY -> compareBy { camelotSortValue(it.camelotKey) }
+    }
+
+    /** Sortable Camelot-wheel position: number*2 + (0 for A, 1 for B), so
+     * e.g. "10A" correctly sorts after "9B" rather than before "2A" the way
+     * plain string comparison would. Null/unparseable keys sort last, via
+     * Int.MAX_VALUE - same convention comparatorFor already uses for a
+     * track with no BPM yet. */
+    private fun camelotSortValue(camelotKey: String?): Int {
+        if (camelotKey == null) return Int.MAX_VALUE
+        val letter = camelotKey.last()
+        val number = camelotKey.dropLast(1).toIntOrNull() ?: return Int.MAX_VALUE
+        return number * 2 + (if (letter == 'A') 0 else 1)
     }
 }

@@ -15,6 +15,7 @@ data class AnalysisResult(
     val waveform: FloatArray,   // fixed-size amplitude buckets, 0..1, for drawing
     val bpm: Float?,            // null if detection failed
     val spectral: SpectralWaveform,   // per-bucket bass/mid/treble split, for spectral-colored drawing
+    val key: String?,           // Camelot notation ("8B" etc) from KeyDetector, null if detection failed
 )
 
 /**
@@ -53,7 +54,8 @@ object AudioAnalyzer {
                 val waveform = buildWaveform(pcm)
                 val bpm = estimateBpm(pcm, sampleRate)
                 val spectral = buildSpectralWaveform(pcm, sampleRate)
-                AnalysisResult(waveform, bpm, spectral)
+                val key = KeyDetector.detectKey(pcm, sampleRate)
+                AnalysisResult(waveform, bpm, spectral, key)
             }
         } catch (t: Throwable) {
             null

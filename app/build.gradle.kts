@@ -11,9 +11,13 @@ android {
         applicationId = "com.oblivion.djayclone"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.7.0" // Stages 1-7 complete: playback, mixing, BPM sync,
-        // cue/loop/hot-cues, live-mix recording + export, filter/echo FX.
+        versionCode = 8
+        versionName = "0.11.0" // Stages 1-10c complete: playback, mixing, BPM sync,
+        // cue/loop/hot-cues, live-mix recording + export, filter/echo FX,
+        // adjustable settings, track library, adaptive tablet/foldable
+        // layout - plus the parallel Audio Engineering track: 3-band EQ,
+        // spectral waveform, VU meter, Tempo-Sync v1 (ratio-aware
+        // half/double-time), Key Detection (Camelot notation), Key Lock.
     }
 
     buildTypes {
@@ -75,4 +79,9 @@ dependencies {
     implementation("androidx.window:window:1.3.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // KeyDetector.kt (and TempoSyncMath.kt/Fft.kt before it) are plain
+    // Kotlin with zero Android imports specifically so they're testable
+    // here, in a real JVM unit test, without an emulator/device.
+    testImplementation("junit:junit:4.13.2")
 }

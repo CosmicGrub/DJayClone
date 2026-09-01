@@ -178,6 +178,17 @@ fun SettingsScreen(
             onValueChangeFinished = { settingsRepo.setNudgeSteps(settings.nudgeCoarsePercent, it / 100f) }
         )
 
+        SettingsSection("TEMPO SYNC")
+        LabeledSlider(
+            label = "Half/double-time match tolerance",
+            value = settings.tempoSyncConfig.ratioToleranceFraction * 100,
+            valueRange = 1f..25f,
+            format = { "%.0f%%".format(it) },
+            onValueChangeFinished = {
+                settingsRepo.setTempoSyncConfig(settings.tempoSyncConfig.copy(ratioToleranceFraction = it / 100f))
+            }
+        )
+
         TextButton(onClick = { showResetConfirm = true }, modifier = Modifier.fillMaxWidth()) {
             Text("RESET TO DEFAULTS", color = Color(0xFFFF5A7A), style = MaterialTheme.typography.labelMedium)
         }
@@ -228,7 +239,7 @@ fun SettingsScreen(
                         "This also shrinks hot cue pads back to $defaultHotCueCount, which will permanently " +
                             "remove cues saved on higher pads on Deck A and/or Deck B."
                     } else {
-                        "This resets FX ranges, hot cue count, and playback defaults to their original values."
+                        "This resets FX ranges, hot cue count, playback defaults, and tempo sync tolerance to their original values."
                     }
                 )
             },

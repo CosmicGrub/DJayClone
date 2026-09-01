@@ -306,13 +306,13 @@ private fun LibraryRow(
             )
         }
         Spacer(Modifier.width(8.dp))
-        // KEY column - a structural placeholder, not fake data: this app
-        // has no harmonic key detection yet, so every row honestly shows
-        // "—" rather than a fabricated Camelot code. The column exists now
-        // because the layout/library-row shape is the parity item; the
-        // real value only lands once key detection itself is built.
+        // KEY column - Camelot notation from KeyDetector (see
+        // TrackCacheRepository), cached the same way BPM is: computed once
+        // when a track is first loaded/analyzed, never proactively scanned
+        // across the whole library. "—" for a track never yet loaded, same
+        // convention as the BPM column just above.
         Text(
-            "—",
+            track.camelotKey ?: "—",
             color = Color.DarkGray,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.width(20.dp)
@@ -381,6 +381,7 @@ private fun sortLabel(sort: LibrarySortOrder): String = when (sort) {
     LibrarySortOrder.DATE_ADDED -> "RECENT"
     LibrarySortOrder.DURATION -> "LENGTH"
     LibrarySortOrder.BPM -> "BPM"
+    LibrarySortOrder.KEY -> "KEY"
 }
 
 private fun formatDuration(ms: Long): String {

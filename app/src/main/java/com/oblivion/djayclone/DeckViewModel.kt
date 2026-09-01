@@ -39,6 +39,14 @@ data class DeckUiState(
     val waveform: FloatArray? = null,
     val spectral: SpectralWaveform? = null,   // null until analysis completes; see AudioAnalyzer
     val bpm: Float? = null,
+    val key: String? = null,      // Camelot notation ("8B" etc), from AudioAnalyzer/KeyDetector
+    // Key Lock ("Master Tempo" in most DJ software): on by default, matching
+    // that convention. NOT reset on loadTrack (see the reset block below,
+    // which deliberately does not touch this field) - like echoActive/
+    // filterValue's persistFxAcrossLoad treatment, this is a per-deck engine
+    // preference, not per-track data, so it should survive across loads on
+    // the same deck the way a DJ would expect a Master Tempo toggle to.
+    val keyLockEnabled: Boolean = true,
     val isAnalyzing: Boolean = false,
     val playbackSpeed: Float = 1f,
     val albumArt: android.graphics.Bitmap? = null,
@@ -293,6 +301,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             waveform = null,
             spectral = null,
             bpm = null,
+            key = null,
             isAnalyzing = true,
             playbackSpeed = 1f,
             albumArt = null,
@@ -346,15 +355,20 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
                 waveform = result?.waveform,
                 spectral = result?.spectral,
                 bpm = result?.bpm,
+                key = result?.key,
                 isAnalyzing = false,
             )
             // Stage 9: piggyback the library's BPM cache on this analysis
             // pass that already runs on every load - deliberately NOT a
             // proactive full-library background scan (real battery/thermal/
             // IO spike over hundreds of files); the cache fills in
-            // organically as tracks get played instead.
+            // organically as tracks get played instead. Key detection rides
+            // the same cache-once policy for the same reason.
             if (result?.bpm != null) {
                 TrackCacheRepository.get(getApplication()).setCachedBpm(TrackId.from(uri), result.bpm)
+            }
+            if (result?.key != null) {
+                TrackCacheRepository.get(getApplication()).setCachedKey(TrackId.from(uri), result.key)
             }
             // Echo's on/off + division setting persists across track loads
             // (see field comment), but its sample-domain delay length is
@@ -379,10 +393,19 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Adjusts playback tempo without touching gain - used for beat-matching
-     * against another deck's BPM. 1.0 = original speed. */
+     * against another deck's BPM. 1.0 = original speed.
+     *
+     * Key Lock support: Media3's ExoPlayer already does real pitch-
+     * independent time-stretching via its underlying Sonic audio processor -
+     * PlaybackParameters(speed, pitch) with pitch held at 1f is all "Key
+     * Lock" needs, no new DSP of our own. With Key Lock off, pitch and
+     * tempo stay coupled (classic vinyl-style pitch-bend) by setting
+     * pitch = speed, same as the single-arg PlaybackParameters(speed) this
+     * replaces. */
     fun setPlaybackSpeed(speed: Float) {
         val clamped = speed.coerceIn(0.5f, 2.0f)
-        player.playbackParameters = androidx.media3.common.PlaybackParameters(clamped)
+        val pitch = if (_state.value.keyLockEnabled) 1f else clamped
+        player.playbackParameters = androidx.media3.common.PlaybackParameters(clamped, pitch)
         _state.value = _state.value.copy(playbackSpeed = clamped)
         // Echo's tap spacing is tempo-relative (effectiveBpm() already folds
         // in this speed change) - re-target it on every speed change
@@ -399,6 +422,16 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
      * tuning knob DJs use to correct sync drift a beat-sync pass can't. */
     fun nudgeSpeed(delta: Float) {
         setPlaybackSpeed(_state.value.playbackSpeed + delta)
+    }
+
+    /** Toggles Key Lock and re-applies PlaybackParameters immediately at the
+     * CURRENT speed, so pitch snaps to/from original right away rather than
+     * waiting for the next speed change to take effect. */
+    fun setKeyLock(enabled: Boolean) {
+        _state.value = _state.value.copy(keyLockEnabled = enabled)
+        val speed = _state.value.playbackSpeed
+        val pitch = if (enabled) 1f else speed
+        player.playbackParameters = androidx.media3.common.PlaybackParameters(speed, pitch)
     }
 
     /** The track's true tempo right now, after any speed adjustment -

@@ -6,11 +6,12 @@ import android.content.Context
 /**
  * SharedPreferences-backed cache for the few things about a track that
  * MediaStore doesn't know and this app computes/tracks itself: analyzed
- * BPM, last-played timestamp, the manual/SAF-imported supplement URI set
- * (plus each manual entry's added-at timestamp), and a thumbnail file-path
- * fallback for tracks ContentResolver.loadThumbnail() can't serve (API
- * 26-28 MediaStore rows, and every manual/SAF row at any API level, since
- * loadThumbnail only accepts MediaStore-backed content:// uris).
+ * BPM, analyzed key (Camelot notation, from KeyDetector), last-played
+ * timestamp, the manual/SAF-imported supplement URI set (plus each manual
+ * entry's added-at timestamp), and a thumbnail file-path fallback for
+ * tracks ContentResolver.loadThumbnail() can't serve (API 26-28 MediaStore
+ * rows, and every manual/SAF row at any API level, since loadThumbnail only
+ * accepts MediaStore-backed content:// uris).
  *
  * Own SharedPreferences file ("djayclone_track_cache"), deliberately
  * separate from SettingsRepository's "djayclone_settings" file so a future
@@ -38,6 +39,15 @@ class TrackCacheRepository private constructor(app: Application) {
 
     fun setCachedBpm(id: TrackId, bpm: Float) {
         prefs.edit().putFloat(KEY_BPM_PREFIX + id.cacheKey(), bpm).apply()
+    }
+
+    /** Camelot notation ("8B" etc), from KeyDetector - same cache-once-
+     * never-recompute treatment as BPM. */
+    fun getCachedKey(id: TrackId): String? =
+        prefs.getString(KEY_CAMELOT_PREFIX + id.cacheKey(), null)
+
+    fun setCachedKey(id: TrackId, camelotKey: String) {
+        prefs.edit().putString(KEY_CAMELOT_PREFIX + id.cacheKey(), camelotKey).apply()
     }
 
     fun getLastPlayed(id: TrackId): Long? {
@@ -90,6 +100,7 @@ class TrackCacheRepository private constructor(app: Application) {
     companion object {
         private const val PREFS_NAME = "djayclone_track_cache"
         private const val KEY_BPM_PREFIX = "bpm_"
+        private const val KEY_CAMELOT_PREFIX = "camelot_"
         private const val KEY_LAST_PLAYED_PREFIX = "last_played_"
         private const val KEY_THUMB_PREFIX = "thumb_"
         private const val KEY_MANUAL_URIS = "manual_uris"

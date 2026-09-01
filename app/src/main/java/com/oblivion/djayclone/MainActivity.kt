@@ -16,6 +16,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -1334,18 +1335,28 @@ private fun DeckColumnCompact(
             modifier = Modifier.fillMaxWidth()
         )
 
-        Text(
-            text = when {
-                state.isAnalyzing -> "Analyzing…"
-                state.bpm != null -> {
-                    val effective = state.bpm * state.playbackSpeed
-                    "%.1f BPM  ·  %.2f%%".format(effective, state.playbackSpeed * 100)
-                }
-                else -> "-- BPM"
-            },
-            color = accent,
-            style = MaterialTheme.typography.labelMedium
-        )
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = when {
+                    state.isAnalyzing -> "Analyzing…"
+                    state.bpm != null -> {
+                        val effective = state.bpm * state.playbackSpeed
+                        val base = "%.1f BPM  ·  %.2f%%".format(effective, state.playbackSpeed * 100)
+                        // Appended after formatting, not folded into the format
+                        // string itself - a Camelot code is data, not a printf
+                        // template, and keeping it out avoids any risk of a
+                        // future value containing a literal '%' being misread
+                        // as a format specifier.
+                        state.key?.let { "$base  ·  $it" } ?: base
+                    }
+                    else -> "-- BPM"
+                },
+                color = accent,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.weight(1f)
+            )
+            KeyLockToggle(enabled = state.keyLockEnabled, accent = accent, onToggle = { deck.setKeyLock(!state.keyLockEnabled) })
+        }
 
         // Stage 5 controls (cue, loop, hot cues) default to collapsed - djay
         // itself keeps the deck's primary view (platter/waveform/transport)
@@ -1467,6 +1478,33 @@ private fun DeckColumnCompact(
 }
 
 /**
+ * Small "🔒 KEY" / "KEY" toggle for Key Lock (see DeckViewModel.setKeyLock).
+ * Deliberately a bare clickable Text, not a TextButton - TextButton's
+ * enforced Material3 minimum touch-target height is exactly the class of
+ * bug that forced VerticalEqBar's own Canvas-based redesign (see
+ * FxControls.kt), and this sits inline in DeckColumnExpanded's already
+ * tightly-budgeted BPM/key row, where that extra height isn't available.
+ * A shared leaf widget, not a big arrangement block - same sharing rule
+ * SyncRatioModeToggle/syncRatioSuffix already follow.
+ *
+ * Text, not the Lock/LockOpen icon DeckLabelRow uses below - that icon
+ * already means a completely different thing here (locking the whole deck's
+ * controls), and reusing it for Key Lock would read as the same toggle.
+ * "🔒 KEY" vs plain-text on/off instead mirrors the sync-lock buttons'
+ * own "🔒 B→A" vs "SYNC B→A" convention elsewhere in this file.
+ */
+@Composable
+private fun KeyLockToggle(enabled: Boolean, accent: Color, onToggle: () -> Unit) {
+    Text(
+        text = if (enabled) "🔒 KEY" else "KEY",
+        color = if (enabled) accent else Color.Gray,
+        maxLines = 1,
+        style = MaterialTheme.typography.labelSmall,
+        modifier = Modifier.clickable(onClick = onToggle).padding(horizontal = 6.dp)
+    )
+}
+
+/**
  * Deck label + lock toggle, shared by both DeckColumn variants. The lock
  * button is deliberately the one control in this whole row-and-below
  * hierarchy that's NEVER gated by [locked] itself - if it were, a locked
@@ -1550,18 +1588,23 @@ private fun DeckColumnExpanded(
             heightDp = 52.dp,
         )
 
-        Text(
-            text = when {
-                state.isAnalyzing -> "Analyzing…"
-                state.bpm != null -> {
-                    val effective = state.bpm * state.playbackSpeed
-                    "%.1f BPM  ·  %.2f%%".format(effective, state.playbackSpeed * 100)
-                }
-                else -> "-- BPM"
-            },
-            color = accent,
-            style = MaterialTheme.typography.labelSmall
-        )
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = when {
+                    state.isAnalyzing -> "Analyzing…"
+                    state.bpm != null -> {
+                        val effective = state.bpm * state.playbackSpeed
+                        val base = "%.1f BPM  ·  %.2f%%".format(effective, state.playbackSpeed * 100)
+                        state.key?.let { "$base  ·  $it" } ?: base
+                    }
+                    else -> "-- BPM"
+                },
+                color = accent,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.weight(1f)
+            )
+            KeyLockToggle(enabled = state.keyLockEnabled, accent = accent, onToggle = { deck.setKeyLock(!state.keyLockEnabled) })
+        }
 
         // No section label here (unlike Compact) and no collapse toggle -
         // this content is always rendered, and a "CUE · LOOP · PADS · FX"
