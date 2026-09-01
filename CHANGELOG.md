@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.12.1](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.12.1) - 2026-09-01
+
+- Library search now matches a track's detected Camelot key (exact match, e.g. `8B`) alongside title/artist.
+- Added this CHANGELOG, a README, and `.gitattributes` to the repo.
+
 ## [v0.12.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.12.0) - 2026-09-01
 
 - **TableTop arrangement** (Stage 10c) — a posture-aware layout for a foldable opened to a horizontal-hinge "laptop" angle and set on a table. Splits at the real hinge position (live sensor data, not a guessed midpoint): a "glance" zone above (both decks' track name/waveform/BPM/key) and a "touch" zone below (transport, EQ, filter, cue/loop/hot cues, nudge, sync, crossfader, recording). Overrides the normal width-based arrangement choice whenever the device reports this posture.
