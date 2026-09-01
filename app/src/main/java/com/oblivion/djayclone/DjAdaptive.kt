@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.window.layout.FoldingFeature
 import androidx.window.layout.WindowInfoTracker
 import androidx.window.layout.WindowMetricsCalculator
+import kotlinx.coroutines.flow.debounce
 
 // Standard Material window-size-class breakpoints. Hand-rolled rather than
 // calling androidx.window.core.layout.WindowSizeClass: that class was
@@ -69,6 +70,11 @@ private const val WIDTH_DP_EXPANDED_LOWER_BOUND = 840
  * whole-screen arrangement. DjPosture, when it's TableTop, overrides that
  * choice regardless of what size alone would have suggested. When Flat,
  * size alone decides.
+ *
+ * Stage 10c fulfills that rule for real: MixerArrangement now branches on
+ * [LocalDjPosture] first, dispatching to MixerArrangementTableTop (in
+ * MainActivity.kt) whenever it reports TableTop, before DjLayoutClass gets
+ * a say.
  */
 enum class DjLayoutClass { COMPACT, MEDIUM, EXPANDED }
 
@@ -117,16 +123,26 @@ fun rememberDjLayoutClass(activity: Activity): DjLayoutClass {
     }
 }
 
+// Stage 10c: TableTop now drives a real UI decision (the whole-screen
+// arrangement swap) instead of just being logged, so the multi-emit-per-
+// gesture risk the Stage 10a comment here used to defer is real now - a
+// fold gesture reporting several rapid WindowLayoutInfo updates mid-motion
+// would otherwise flicker the entire arrangement between COMPACT/MEDIUM/
+// EXPANDED and TableTop while the DJ is still mid-fold, not yet settled
+// into the posture they meant. 200ms is a starting point, not a measured
+// figure - real hardware (an actual physical fold gesture, not something
+// checkable by tapping a flat screen) is what should tune this if it ever
+// feels laggy or flickery in practice.
+private const val POSTURE_DEBOUNCE_MS = 200L
+
 /** Collects WindowInfoTracker's Flow for the lifetime of the composition -
  * this is the live signal a fold-angle change (not just a discrete
- * Configuration change) delivers through. Debouncing WindowLayoutInfo's
- * potential multi-emit-per-gesture behavior is deferred to Stage 10c
- * (TableTop itself), per the pitch's own risk list - Stage 10a only reads
- * and logs this signal, it doesn't yet drive any UI decision from it. */
+ * Configuration change) delivers through. */
+@OptIn(kotlinx.coroutines.FlowPreview::class) // Flow.debounce() - see POSTURE_DEBOUNCE_MS's doc above
 @Composable
 fun rememberDjPosture(activity: Activity): DjPosture {
     val posture by produceState<DjPosture>(initialValue = DjPosture.Flat, activity) {
-        WindowInfoTracker.getOrCreate(activity).windowLayoutInfo(activity).collect { info ->
+        WindowInfoTracker.getOrCreate(activity).windowLayoutInfo(activity).debounce(POSTURE_DEBOUNCE_MS).collect { info ->
             val folding = info.displayFeatures.filterIsInstance<FoldingFeature>().firstOrNull()
             val next = if (
                 folding != null &&

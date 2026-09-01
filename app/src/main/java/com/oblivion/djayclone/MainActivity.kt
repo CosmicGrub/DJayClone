@@ -4,6 +4,7 @@ package com.oblivion.djayclone
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Rect
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -47,6 +48,8 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
@@ -548,11 +551,11 @@ fun MixerScreen(
 }
 
 /**
- * Stage 10a/10b: the whole-screen arrangement dispatcher. Reads only
- * [LocalDjLayoutClass] - not [LocalDjPosture] yet. TableTop-specific
- * arrangement is Stage 10c's job (see DjAdaptive.kt's doc comment); this
- * dispatcher's job is a real 3-way split on width alone, and DjPosture is
- * still Flat-only-consumed at this stage regardless of what it reports.
+ * Stage 10a/10b/10c: the whole-screen arrangement dispatcher. Checks
+ * [LocalDjPosture] FIRST - TableTop overrides whatever [LocalDjLayoutClass]
+ * alone would have picked, per the rule stated on DjPosture's own doc
+ * comment in DjAdaptive.kt. Only when posture is Flat does width-based
+ * DjLayoutClass get to decide between COMPACT/MEDIUM/EXPANDED below.
  *
  * MEDIUM and EXPANDED no longer share one treatment - Stage 10a's own
  * comment here originally said they would "until Stage 10b," and this is
@@ -595,6 +598,21 @@ private fun MixerArrangement(
     onAddFromFiles: () -> Unit,
     onRequestLibraryPermission: () -> Unit,
 ) {
+    val posture = LocalDjPosture.current
+    if (posture is DjPosture.TableTop) {
+        MixerArrangementTableTop(
+            deckA = deckA, deckB = deckB, stateA = stateA, stateB = stateB,
+            settings = settings, recState = recState, recording = recording,
+            crossfader = crossfader, onCrossfaderChange = onCrossfaderChange,
+            syncLock = syncLock, onSyncLockChange = onSyncLockChange,
+            syncRatioMode = syncRatioMode, onSyncRatioModeChange = onSyncRatioModeChange,
+            onImportA = onImportA, onImportB = onImportB,
+            onStartRecording = onStartRecording, onOpenSettings = onOpenSettings,
+            onOpenLibrary = onOpenLibrary,
+            hingeBounds = posture.hingeBounds,
+        )
+        return
+    }
     when (LocalDjLayoutClass.current) {
         DjLayoutClass.COMPACT -> MixerArrangementCompact(
             deckA = deckA, deckB = deckB, stateA = stateA, stateB = stateB,
@@ -627,6 +645,243 @@ private fun MixerArrangement(
             libraryViewModel = libraryViewModel, onLoadTrack = onLoadTrack,
             onAddFromFiles = onAddFromFiles, onRequestLibraryPermission = onRequestLibraryPermission,
         )
+    }
+}
+
+/**
+ * Stage 10c: the arrangement DjAdaptive.kt's own doc comment named as still
+ * deferred ("DjPosture is still Flat-only-consumed at this stage"). Split at
+ * the REAL hinge position ([hingeBounds], live sensor data from
+ * FoldingFeature.bounds - never a guessed constant), not a fixed midpoint:
+ * a horizontal-hinge fold's crease genuinely does not sit at 50% of the
+ * window in every posture/angle.
+ *
+ * Above the hinge is the "glance" zone - tilted back toward the DJ's face,
+ * harder to reach precisely: track name, waveform, BPM/key for both decks.
+ * Below the hinge is the "touch" zone - resting near-flat on the table,
+ * the easiest part of the screen to actually operate: transport, EQ,
+ * filter, cue/loop/hot cues, nudge, sync, crossfader, record - everything
+ * a DJ's hands work mid-mix. The physical crease itself renders nothing
+ * (a plain Spacer at [hingeBounds]'s real height) rather than content that
+ * would just sit under the fold.
+ *
+ * Each DeckTouchPane gets its own verticalScroll, the same defensive
+ * fallback MixerArrangementCompact's deck column already uses - unlike
+ * DeckColumnExpanded's "everything must fit, no scrolling" rule, which
+ * rests on a real *measured* fixed-screen-size budget, TableTop's usable
+ * height is however tall the DJ has physically opened the hinge right now,
+ * which nothing here can measure in advance. (The outer Row that holds
+ * both DeckTouchPanes plus CenterMixColumn is deliberately NOT itself
+ * scrollable - CenterMixColumn fillMaxHeight()s against it, which needs a
+ * bounded, not infinite, height constraint; only each individual deck pane
+ * scrolls internally.) This can follow Expanded's lead and drop the scroll
+ * if real hardware confirms it always fits - "real hardware" here means an
+ * actual physical fold to a real tabletop angle, not just a free device,
+ * since nothing about this posture is triggerable by tapping a flat screen.
+ */
+@Composable
+private fun MixerArrangementTableTop(
+    deckA: DeckViewModel,
+    deckB: DeckViewModel,
+    stateA: DeckUiState,
+    stateB: DeckUiState,
+    settings: AppSettings,
+    recState: RecordingUiState,
+    recording: RecordingViewModel,
+    crossfader: Float,
+    onCrossfaderChange: (Float) -> Unit,
+    syncLock: String?,
+    onSyncLockChange: (String?) -> Unit,
+    syncRatioMode: SyncRatioMode,
+    onSyncRatioModeChange: (SyncRatioMode) -> Unit,
+    onImportA: () -> Unit,
+    onImportB: () -> Unit,
+    onStartRecording: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenLibrary: () -> Unit,
+    hingeBounds: Rect,
+) {
+    val density = LocalDensity.current.density
+    // hingeBounds is real window pixels (FoldingFeature.bounds) - convert
+    // to dp once, here, rather than let raw pixel math leak into a layout
+    // that otherwise works entirely in dp like every other arrangement.
+    val hingeTopDp = (hingeBounds.top / density).dp.coerceAtLeast(0.dp)
+    val hingeGapDp = ((hingeBounds.bottom - hingeBounds.top) / density).dp.coerceAtLeast(0.dp)
+
+    Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        // Glance zone - header lives INSIDE this height(hingeTopDp) block,
+        // not stacked above it, specifically so it doesn't silently push
+        // the deck panes below out of alignment with the real physical
+        // hinge - everything from y=0 to y=hingeTopDp is the glance zone,
+        // full stop.
+        Column(
+            modifier = Modifier.fillMaxWidth().height(hingeTopDp).padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("DJayClone", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                Row {
+                    IconButton(onClick = onOpenLibrary, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.LibraryMusic, contentDescription = "Library", tint = Color.Gray, modifier = Modifier.size(18.dp))
+                    }
+                    IconButton(onClick = onOpenSettings, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = Color.Gray, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                DeckGlancePane(accent = AccentA, state = stateA, deck = deckA, onImport = onImportA, modifier = Modifier.weight(1f))
+                DeckGlancePane(accent = AccentB, state = stateB, deck = deckB, onImport = onImportB, modifier = Modifier.weight(1f))
+            }
+        }
+
+        Spacer(modifier = Modifier.fillMaxWidth().height(hingeGapDp))
+
+        // Touch zone - gets everything left over below the hinge gap.
+        Row(
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            DeckTouchPane(state = stateA, deck = deckA, accent = AccentA, settings = settings, modifier = Modifier.weight(1f))
+            CenterMixColumn(
+                deckA = deckA, deckB = deckB, stateA = stateA, stateB = stateB,
+                recState = recState, recording = recording,
+                crossfader = crossfader, onCrossfaderChange = onCrossfaderChange,
+                syncLock = syncLock, onSyncLockChange = onSyncLockChange,
+                syncRatioMode = syncRatioMode, onSyncRatioModeChange = onSyncRatioModeChange,
+                tempoSyncTolerance = settings.tempoSyncConfig.ratioToleranceFraction,
+                onStartRecording = onStartRecording,
+            )
+            DeckTouchPane(state = stateB, deck = deckB, accent = AccentB, settings = settings, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+/** Glance-zone content for one deck - track name, waveform, BPM/key. No
+ * transport/FX controls here on purpose; see MixerArrangementTableTop's
+ * doc comment for the glance/touch split rationale. */
+@Composable
+private fun DeckGlancePane(
+    accent: Color,
+    state: DeckUiState,
+    deck: DeckViewModel,
+    onImport: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        TextButton(
+            onClick = onImport,
+            enabled = !state.isLocked,
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+        ) {
+            Icon(
+                Icons.Filled.FolderOpen, contentDescription = null,
+                tint = if (state.isLocked) Color.DarkGray else accent,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                state.trackName, color = if (state.isLocked) Color.DarkGray else Color.White,
+                maxLines = 1, style = MaterialTheme.typography.labelSmall
+            )
+        }
+
+        val progress = if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
+        WaveformStrip(
+            trackName = state.trackName,
+            progress = progress,
+            accentColor = accent,
+            waveform = state.waveform,
+            spectral = state.spectral,
+            isAnalyzing = state.isAnalyzing,
+            durationMs = state.durationMs,
+            cuePointMs = state.cuePointMs,
+            loopInMs = state.loopInMs,
+            loopOutMs = state.loopOutMs,
+            loopActive = state.loopActive,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+        )
+
+        DeckBpmKeyRow(state = state, deck = deck, accent = accent, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/** Touch-zone content for one deck - transport, cue/loop/hot cues, nudge,
+ * gain, filter, EQ, echo. Its own verticalScroll - see
+ * MixerArrangementTableTop's doc comment for why this pane scrolls where
+ * DeckColumnExpanded's doesn't. Nudge buttons combine into one row of four
+ * rather than two rows of two, following DeckColumnExpanded's own
+ * established precedent for tight vertical space. */
+@Composable
+private fun DeckTouchPane(
+    state: DeckUiState,
+    deck: DeckViewModel,
+    accent: Color,
+    settings: AppSettings,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            MetallicIconButton(onClick = { deck.togglePlay() }, enabled = !state.isLocked) {
+                Icon(
+                    if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = "Play/Pause",
+                    tint = if (state.isLocked) Color.DarkGray else accent,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "${format(state.positionMs)} / ${format(state.durationMs)}",
+                color = Color.Gray,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+
+        CueLoopRow(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
+        BeatLoopChips(
+            state = state, deck = deck, accent = accent,
+            extendedLengths = settings.extendedLoopLengths,
+            modifier = Modifier.fillMaxWidth(),
+            locked = state.isLocked,
+        )
+        HotCueGrid(hotCues = state.hotCues, deck = deck, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
+
+        val coarsePct = settings.nudgeCoarsePercent
+        val finePct = settings.nudgeFinePercent
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            NudgeButton("−%.2f%%".format(coarsePct * 100), accent, enabled = !state.isLocked) { deck.nudgeSpeed(-coarsePct) }
+            NudgeButton("+%.2f%%".format(coarsePct * 100), accent, enabled = !state.isLocked) { deck.nudgeSpeed(coarsePct) }
+            NudgeButton("−%.3f%%".format(finePct * 100), accent, enabled = !state.isLocked) { deck.nudgeSpeed(-finePct) }
+            NudgeButton("+%.3f%%".format(finePct * 100), accent, enabled = !state.isLocked) { deck.nudgeSpeed(finePct) }
+        }
+
+        Text("GAIN", color = Color.Gray, style = MaterialTheme.typography.labelSmall)
+        Slider(
+            value = state.gain,
+            valueRange = 0f..1f,
+            onValueChange = { deck.setGain(it) },
+            enabled = !state.isLocked,
+            colors = SliderDefaults.colors(
+                thumbColor = accent,
+                activeTrackColor = accent,
+                inactiveTrackColor = Color.DarkGray,
+            )
+        )
+
+        FilterSlider(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
+        EqControls(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
+        EchoRow(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
     }
 }
 
@@ -1335,28 +1590,7 @@ private fun DeckColumnCompact(
             modifier = Modifier.fillMaxWidth()
         )
 
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = when {
-                    state.isAnalyzing -> "Analyzing…"
-                    state.bpm != null -> {
-                        val effective = state.bpm * state.playbackSpeed
-                        val base = "%.1f BPM  ·  %.2f%%".format(effective, state.playbackSpeed * 100)
-                        // Appended after formatting, not folded into the format
-                        // string itself - a Camelot code is data, not a printf
-                        // template, and keeping it out avoids any risk of a
-                        // future value containing a literal '%' being misread
-                        // as a format specifier.
-                        state.key?.let { "$base  ·  $it" } ?: base
-                    }
-                    else -> "-- BPM"
-                },
-                color = accent,
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.weight(1f)
-            )
-            KeyLockToggle(enabled = state.keyLockEnabled, accent = accent, onToggle = { deck.setKeyLock(!state.keyLockEnabled) })
-        }
+        DeckBpmKeyRow(state = state, deck = deck, accent = accent, style = MaterialTheme.typography.labelMedium)
 
         // Stage 5 controls (cue, loop, hot cues) default to collapsed - djay
         // itself keeps the deck's primary view (platter/waveform/transport)
@@ -1493,6 +1727,41 @@ private fun DeckColumnCompact(
  * "🔒 KEY" vs plain-text on/off instead mirrors the sync-lock buttons'
  * own "🔒 B→A" vs "SYNC B→A" convention elsewhere in this file.
  */
+/**
+ * BPM/key readout + Key Lock toggle - a shared leaf row (small widget, not
+ * a big arrangement block, same sharing rule KeyLockToggle/
+ * SyncRatioModeToggle/syncRatioSuffix already follow), extracted here once
+ * it was about to be copy-pasted character-for-character a third time
+ * (DeckColumnCompact, DeckColumnExpanded, and Stage 10c's DeckGlancePane
+ * below). [style] is left to the caller since Compact/Expanded/TableTop
+ * each read this at a different density.
+ */
+@Composable
+private fun DeckBpmKeyRow(state: DeckUiState, deck: DeckViewModel, accent: Color, style: TextStyle, modifier: Modifier = Modifier) {
+    Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = when {
+                state.isAnalyzing -> "Analyzing…"
+                state.bpm != null -> {
+                    val effective = state.bpm * state.playbackSpeed
+                    val base = "%.1f BPM  ·  %.2f%%".format(effective, state.playbackSpeed * 100)
+                    // Appended after formatting, not folded into the format
+                    // string itself - a Camelot code is data, not a printf
+                    // template, and keeping it out avoids any risk of a
+                    // future value containing a literal '%' being misread
+                    // as a format specifier.
+                    state.key?.let { "$base  ·  $it" } ?: base
+                }
+                else -> "-- BPM"
+            },
+            color = accent,
+            style = style,
+            modifier = Modifier.weight(1f)
+        )
+        KeyLockToggle(enabled = state.keyLockEnabled, accent = accent, onToggle = { deck.setKeyLock(!state.keyLockEnabled) })
+    }
+}
+
 @Composable
 private fun KeyLockToggle(enabled: Boolean, accent: Color, onToggle: () -> Unit) {
     Text(
@@ -1588,23 +1857,7 @@ private fun DeckColumnExpanded(
             heightDp = 52.dp,
         )
 
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = when {
-                    state.isAnalyzing -> "Analyzing…"
-                    state.bpm != null -> {
-                        val effective = state.bpm * state.playbackSpeed
-                        val base = "%.1f BPM  ·  %.2f%%".format(effective, state.playbackSpeed * 100)
-                        state.key?.let { "$base  ·  $it" } ?: base
-                    }
-                    else -> "-- BPM"
-                },
-                color = accent,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.weight(1f)
-            )
-            KeyLockToggle(enabled = state.keyLockEnabled, accent = accent, onToggle = { deck.setKeyLock(!state.keyLockEnabled) })
-        }
+        DeckBpmKeyRow(state = state, deck = deck, accent = accent, style = MaterialTheme.typography.labelSmall)
 
         // No section label here (unlike Compact) and no collapse toggle -
         // this content is always rendered, and a "CUE · LOOP · PADS · FX"
