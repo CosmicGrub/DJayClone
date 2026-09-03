@@ -50,4 +50,4 @@ The app is a single Gradle module (`app/`). A few entry points worth knowing abo
 
 ## License
 
-No license is currently granted — all rights reserved. Feel free to read the code, but please ask before reusing or redistributing it.
+[MIT](LICENSE)
