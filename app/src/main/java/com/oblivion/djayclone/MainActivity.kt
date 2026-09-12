@@ -1367,7 +1367,18 @@ private fun CenterMixColumn(
     Column(
         modifier = Modifier
             .width(200.dp)
-            .fillMaxHeight(),
+            .fillMaxHeight()
+            // Defensive, same reasoning as DeckTouchPane's own scroll (see
+            // MixerArrangementTableTop's doc comment): this column had no
+            // scroll at all before, which was never a problem on
+            // MixerArrangementExpanded's real >=840dp tablet budget - real
+            // hardware in TableTop posture (a genuinely shorter, live
+            // fold-angle-dependent height) proved content here (RECORD,
+            // CROSSFADER) can run off the bottom of the window with
+            // absolutely no way to reach it. A scrollable Column whose
+            // content already fits (Expanded's case) behaves identically
+            // to a non-scrollable one, so this is safe there too.
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.Center
     ) {
         // VU meter - one bar per deck, reading real audio-thread RMS level
