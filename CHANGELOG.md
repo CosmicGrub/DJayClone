@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.12.3](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.12.3) - 2026-09-12
+
+- Fixed a second live-mix recording in the same app session silently never recording anything (a stale `Job` reference blocked capture from restarting) - found while gathering audio evidence for Key Lock's pitch-preservation behavior.
+
 ## [v0.12.2](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.12.2) - 2026-09-12
 
 - Fixed TableTop's RECORD and CROSSFADER controls being completely unreachable (no scroll mechanism on the center column) - found on the first real physical-fold test of a Z Fold 5.
