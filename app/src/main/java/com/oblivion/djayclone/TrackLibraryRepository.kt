@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ContentUris
 import android.database.Cursor
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.Html
@@ -14,6 +15,31 @@ import kotlinx.coroutines.withContext
  * the call site comment in queryMediaStore() for why this is needed. */
 private fun decodeHtmlEntities(s: String): String =
     Html.fromHtml(s, Html.FROM_HTML_MODE_LEGACY).toString()
+
+/** Folder-path substrings that mark a MediaStore audio row as a voice memo
+ * or call recording rather than actual music - found for real during a
+ * real-device integration pass, where a 5.5-hour personal voice recording
+ * (Samsung Voice Recorder's own "Recordings" folder) showed up as a
+ * perfectly ordinary-looking library row, since MediaStore's audio
+ * collection makes no music/speech distinction on its own. Matched
+ * case-insensitively against RELATIVE_PATH (API 29+) or DATA (API 26-28 -
+ * still populated pre-scoped-storage; see queryMediaStore()'s own comment).
+ * Deliberately a narrow, known-folder-name allowlist rather than a broad
+ * heuristic like "long duration" or "mono channel" - those would risk
+ * false-positive excluding a real long mix/podcast/DJ set a user actually
+ * wants to load. */
+private val NON_MUSIC_PATH_MARKERS = listOf(
+    "voice recorder",
+    "callrecordings",
+    "call recordings",
+    "/recordings/",
+)
+
+private fun isLikelyNonMusicPath(path: String?): Boolean {
+    if (path.isNullOrBlank()) return false
+    val lower = path.lowercase()
+    return NON_MUSIC_PATH_MARKERS.any { lower.contains(it) }
+}
 
 /**
  * Identifies a track by whatever its source can actually offer: a real
@@ -101,6 +127,12 @@ class TrackLibraryRepository(private val app: Application) {
     }
 
     private fun queryMediaStore(): List<LibraryTrack> {
+        // RELATIVE_PATH doesn't exist before API 29 (scoped storage) - DATA
+        // is deprecated as of API 29 for WRITING, but remains populated and
+        // queryable for a plain read like this one, and is the only path
+        // column available at all on this app's minSdk 26-28 floor.
+        val pathColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            MediaStore.Audio.Media.RELATIVE_PATH else MediaStore.Audio.Media.DATA
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DISPLAY_NAME,
@@ -108,6 +140,7 @@ class TrackLibraryRepository(private val app: Application) {
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.DATE_ADDED,
+            pathColumn,
         )
         val tracks = mutableListOf<LibraryTrack>()
         try {
@@ -121,7 +154,9 @@ class TrackLibraryRepository(private val app: Application) {
                 val artistIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
                 val durationIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                 val dateIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
+                val pathIdx = cursor.getColumnIndexOrThrow(pathColumn)
                 while (cursor.moveToNext()) {
+                    if (isLikelyNonMusicPath(cursor.getString(pathIdx))) continue
                     val id = cursor.getLong(idIdx)
                     val trackId = TrackId.MediaStoreId(id)
                     val uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)

@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.13.1](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.13.1) - 2026-09-12
+
+- The track library no longer surfaces voice memos / call recordings (e.g. Samsung Voice Recorder's "Recordings" folder) alongside real music. MediaStore's audio collection doesn't distinguish speech from music on its own, so anything in a recognized voice-recorder-style folder is now filtered out of the scan. Found during an end-to-end integration pass, where a personal voice recording showed up as an ordinary-looking library row.
+
 ## [v0.13.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.13.0) - 2026-09-12
 
 - **Auto Gain** — on track load, analyzes the track's overall loudness (RMS) and normalizes the deck's GAIN toward a -12 dBFS ceiling. Attenuation-only by design (Android's `Player.volume` API is hard-capped at 1.0, so there's no way to boost past unity anyway) - a track already quieter than the ceiling is left untouched rather than clamped/boosted, which would risk clipping transients that were never near 0dBFS. On by default; toggle in Settings. The measured value is always cached alongside BPM/Key regardless of the setting; only *applying* it to the deck's gain is gated by the toggle.

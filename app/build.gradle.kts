@@ -11,8 +11,8 @@ android {
         applicationId = "com.oblivion.djayclone"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "0.13.0" // Stages 1-10c complete: playback, mixing, BPM sync,
+        versionCode = 14
+        versionName = "0.13.1" // Stages 1-10c complete: playback, mixing, BPM sync,
         // cue/loop/hot-cues, live-mix recording + export, filter/echo FX,
         // adjustable settings, track library, adaptive tablet/foldable
         // layout including the TableTop posture-aware arrangement (the one
