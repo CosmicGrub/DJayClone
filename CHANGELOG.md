@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.12.2](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.12.2) - 2026-09-12
+
+- Fixed TableTop's RECORD and CROSSFADER controls being completely unreachable (no scroll mechanism on the center column) - found on the first real physical-fold test of a Z Fold 5.
+
 ## [v0.12.1](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.12.1) - 2026-09-01
 
 - Library search now matches a track's detected Camelot key (exact match, e.g. `8B`) alongside title/artist.
