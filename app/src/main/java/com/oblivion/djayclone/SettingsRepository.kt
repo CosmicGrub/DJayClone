@@ -46,6 +46,10 @@ data class AppSettings(
     val nudgeCoarsePercent: Float = 0.01f,
     val nudgeFinePercent: Float = 0.001f,
     val tempoSyncConfig: TempoSyncConfig = TempoSyncConfig(),
+    // Auto Gain: on by default, matching real DJ software's convention -
+    // see AudioAnalyzer.estimateAutoGain's own doc for what it computes and
+    // why it can only ever attenuate, never boost.
+    val autoGainEnabled: Boolean = true,
 )
 
 /**
@@ -99,6 +103,7 @@ class SettingsRepository private constructor(app: Application) {
             tempoSyncConfig = TempoSyncConfig(
                 ratioToleranceFraction = prefs.getFloat(KEY_SYNC_TOLERANCE, d.tempoSyncConfig.ratioToleranceFraction),
             ),
+            autoGainEnabled = prefs.getBoolean(KEY_AUTO_GAIN_ENABLED, d.autoGainEnabled),
         )
     }
 
@@ -162,6 +167,11 @@ class SettingsRepository private constructor(app: Application) {
         _settings.value = _settings.value.copy(nudgeCoarsePercent = coarse, nudgeFinePercent = fine)
     }
 
+    fun setAutoGainEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_GAIN_ENABLED, enabled).apply()
+        _settings.value = _settings.value.copy(autoGainEnabled = enabled)
+    }
+
     fun setTempoSyncConfig(config: TempoSyncConfig) {
         // 1%-25% - below 1% risks false-positive matches from ordinary BPM-
         // detection jitter; above 25% starts overlapping the real spacing
@@ -193,6 +203,7 @@ class SettingsRepository private constructor(app: Application) {
         private const val KEY_NUDGE_COARSE = "nudge_coarse"
         private const val KEY_NUDGE_FINE = "nudge_fine"
         private const val KEY_SYNC_TOLERANCE = "sync_ratio_tolerance"
+        private const val KEY_AUTO_GAIN_ENABLED = "auto_gain_enabled"
 
         @Volatile private var INSTANCE: SettingsRepository? = null
         fun get(app: Application): SettingsRepository =

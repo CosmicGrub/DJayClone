@@ -6,7 +6,8 @@ import android.content.Context
 /**
  * SharedPreferences-backed cache for the few things about a track that
  * MediaStore doesn't know and this app computes/tracks itself: analyzed
- * BPM, analyzed key (Camelot notation, from KeyDetector), last-played
+ * BPM, analyzed key (Camelot notation, from KeyDetector), Auto Gain's
+ * suggested level (from AudioAnalyzer.estimateAutoGain), last-played
  * timestamp, the manual/SAF-imported supplement URI set (plus each manual
  * entry's added-at timestamp), and a thumbnail file-path fallback for
  * tracks ContentResolver.loadThumbnail() can't serve (API 26-28 MediaStore
@@ -48,6 +49,20 @@ class TrackCacheRepository private constructor(app: Application) {
 
     fun setCachedKey(id: TrackId, camelotKey: String) {
         prefs.edit().putString(KEY_CAMELOT_PREFIX + id.cacheKey(), camelotKey).apply()
+    }
+
+    /** Auto Gain's suggested GAIN slider value (0f..1f), from
+     * AudioAnalyzer.estimateAutoGain - same cache-once-recomputed-on-every-
+     * load-anyway treatment as BPM/key (the cache backs the library list;
+     * the deck itself re-runs the whole analysis pass on every load
+     * regardless, this just rides along for free). */
+    fun getCachedAutoGain(id: TrackId): Float? {
+        val key = KEY_AUTO_GAIN_PREFIX + id.cacheKey()
+        return if (prefs.contains(key)) prefs.getFloat(key, 1f) else null
+    }
+
+    fun setCachedAutoGain(id: TrackId, gain: Float) {
+        prefs.edit().putFloat(KEY_AUTO_GAIN_PREFIX + id.cacheKey(), gain).apply()
     }
 
     fun getLastPlayed(id: TrackId): Long? {
@@ -101,6 +116,7 @@ class TrackCacheRepository private constructor(app: Application) {
         private const val PREFS_NAME = "djayclone_track_cache"
         private const val KEY_BPM_PREFIX = "bpm_"
         private const val KEY_CAMELOT_PREFIX = "camelot_"
+        private const val KEY_AUTO_GAIN_PREFIX = "auto_gain_"
         private const val KEY_LAST_PLAYED_PREFIX = "last_played_"
         private const val KEY_THUMB_PREFIX = "thumb_"
         private const val KEY_MANUAL_URIS = "manual_uris"

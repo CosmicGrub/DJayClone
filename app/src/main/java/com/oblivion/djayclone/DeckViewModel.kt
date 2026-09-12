@@ -370,6 +370,19 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             if (result?.key != null) {
                 TrackCacheRepository.get(getApplication()).setCachedKey(TrackId.from(uri), result.key)
             }
+            // Auto Gain: the measured value is always cached (same
+            // unconditional-cache philosophy as BPM/key above - it's just a
+            // recorded measurement), but only actually APPLIED to the deck's
+            // gain when the setting is on. Unlike BPM/key, this one changes
+            // real on-load deck behavior, so it needs the same settings-gate
+            // as persistLoopsAndCues/persistFx above rather than always
+            // taking effect unconditionally.
+            if (result?.autoGain != null) {
+                TrackCacheRepository.get(getApplication()).setCachedAutoGain(TrackId.from(uri), result.autoGain)
+                if (settings.autoGainEnabled) {
+                    _state.value = _state.value.copy(gain = result.autoGain)
+                }
+            }
             // Echo's on/off + division setting persists across track loads
             // (see field comment), but its sample-domain delay length is
             // tempo-relative like playbackSpeed - re-lock it to the NEW

@@ -16,6 +16,14 @@ data class AnalysisResult(
     val bpm: Float?,            // null if detection failed
     val spectral: SpectralWaveform,   // per-bucket bass/mid/treble split, for spectral-colored drawing
     val key: String?,           // Camelot notation ("8B" etc) from KeyDetector, null if detection failed
+    // Suggested GAIN slider value (0f..1f) to bring this track's overall
+    // level toward AUTO_GAIN_CEILING_DBFS, or null if the track was too
+    // near-silent to measure meaningfully. Attenuation-only by construction
+    // (see AudioAnalyzer.estimateAutoGain's own doc) - never > 1f, since
+    // DeckViewModel.setEffectiveVolume() coerces player.volume to Android's
+    // hard 0f..1f ceiling anyway, so a value >1f could never actually boost
+    // anything even if this returned one.
+    val autoGain: Float?,
 )
 
 /**
@@ -55,7 +63,8 @@ object AudioAnalyzer {
                 val bpm = estimateBpm(pcm, sampleRate)
                 val spectral = buildSpectralWaveform(pcm, sampleRate)
                 val key = KeyDetector.detectKey(pcm, sampleRate)
-                AnalysisResult(waveform, bpm, spectral, key)
+                val autoGain = estimateAutoGain(pcm)
+                AnalysisResult(waveform, bpm, spectral, key, autoGain)
             }
         } catch (t: Throwable) {
             null
@@ -325,5 +334,43 @@ object AudioAnalyzer {
         while (folded < 70f) folded *= 2f
         while (folded > 190f) folded /= 2f
         return folded
+    }
+
+    // An engineering reference, not a broadcast-loudness-standard constant
+    // (no true LUFS/K-weighting here, same "plain, disclosed approximation"
+    // spirit as estimateBpm's octave-folding above) - roughly where a
+    // hot-mastered modern track's overall RMS sits. Tracks measuring at or
+    // above this get pulled down toward it; quieter tracks are left alone
+    // (see the doc on AnalysisResult.autoGain for why boosting isn't done -
+    // or even possible downstream).
+    private const val AUTO_GAIN_CEILING_DBFS = -12.0
+    private const val AUTO_GAIN_MIN = 0.15f
+
+    /**
+     * Suggested GAIN slider value (0f..1f) that would bring this track's
+     * overall RMS level down to AUTO_GAIN_CEILING_DBFS, or null if the
+     * decoded audio is too near-silent to measure meaningfully (RMS ~0
+     * would otherwise send log10 to -infinity).
+     *
+     * Whole-track plain RMS, not a perceptual/gated loudness measure - the
+     * same pragmatic-approximation tier as this file's other measurements,
+     * not a mastering-grade LUFS implementation. Deliberately attenuation-
+     * only: if a track's RMS is already below the ceiling, the "ideal"
+     * multiplier this formula would want is > 1f, which gets clamped to 1f
+     * (leave it alone) rather than boosted - boosting a quiet track in
+     * software risks clipping transients that were never actually near
+     * 0dBFS, and DeckViewModel.setEffectiveVolume() coerces player.volume
+     * to Android's hard 0f..1f range anyway, so anything above 1f could
+     * never take effect downstream regardless.
+     */
+    private fun estimateAutoGain(pcm: FloatArray): Float? {
+        if (pcm.isEmpty()) return null
+        var sumSquares = 0.0
+        for (sample in pcm) sumSquares += sample.toDouble() * sample.toDouble()
+        val rms = kotlin.math.sqrt(sumSquares / pcm.size)
+        if (rms < 1e-6) return null // near-silent - nothing meaningful to normalize against
+        val trackDbfs = 20.0 * kotlin.math.log10(rms)
+        val gain = Math.pow(10.0, (AUTO_GAIN_CEILING_DBFS - trackDbfs) / 20.0)
+        return gain.toFloat().coerceIn(AUTO_GAIN_MIN, 1f)
     }
 }

@@ -163,6 +163,11 @@ fun SettingsScreen(
             checked = settings.persistFxAcrossLoad,
             onCheckedChange = { settingsRepo.setPersistFxAcrossLoad(it) }
         )
+        SwitchRow(
+            label = "Auto Gain (normalize level on track load)",
+            checked = settings.autoGainEnabled,
+            onCheckedChange = { settingsRepo.setAutoGainEnabled(it) }
+        )
         LabeledSlider(
             label = "Coarse nudge step",
             value = settings.nudgeCoarsePercent * 100,
@@ -239,7 +244,7 @@ fun SettingsScreen(
                         "This also shrinks hot cue pads back to $defaultHotCueCount, which will permanently " +
                             "remove cues saved on higher pads on Deck A and/or Deck B."
                     } else {
-                        "This resets FX ranges, hot cue count, playback defaults, and tempo sync tolerance to their original values."
+                        "This resets FX ranges, hot cue count, playback defaults (including Auto Gain), and tempo sync tolerance to their original values."
                     }
                 )
             },

@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.13.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.13.0) - 2026-09-12
+
+- **Auto Gain** — on track load, analyzes the track's overall loudness (RMS) and normalizes the deck's GAIN toward a -12 dBFS ceiling. Attenuation-only by design (Android's `Player.volume` API is hard-capped at 1.0, so there's no way to boost past unity anyway) - a track already quieter than the ceiling is left untouched rather than clamped/boosted, which would risk clipping transients that were never near 0dBFS. On by default; toggle in Settings. The measured value is always cached alongside BPM/Key regardless of the setting; only *applying* it to the deck's gain is gated by the toggle.
+- Verified on real hardware: a real music track measured well below the ceiling correctly triggered no change (cross-checked against an independent ffmpeg-decode + Python RMS/dBFS recomputation of the same source file), and a synthetic loud test tone with a known expected gain (~0.395) correctly triggered visible attenuation, confirmed both visually and via pixel-level measurement of the GAIN slider's fill.
+
 ## [v0.12.3](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.12.3) - 2026-09-12
 
 - Fixed a second live-mix recording in the same app session silently never recording anything (a stale `Job` reference blocked capture from restarting) - found while gathering audio evidence for Key Lock's pitch-preservation behavior.
