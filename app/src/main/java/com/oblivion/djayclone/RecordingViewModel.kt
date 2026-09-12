@@ -120,6 +120,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         pendingFile = null
         _state.value = _state.value.copy(hasPendingRecording = false)
         unbindService()
+        stopRecordingService()
     }
 
     fun save() {
@@ -150,6 +151,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                 pendingFile = null
                 _state.value = _state.value.copy(isSaving = false, hasPendingRecording = false)
                 unbindService()
+                stopRecordingService()
             } catch (e: IOException) {
                 // Don't leave an orphaned IS_PENDING row in the user's Music
                 // library if the copy itself failed partway through.
@@ -174,6 +176,30 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         serviceConnection = null
         collectJob?.cancel()
         boundService = null
+    }
+
+    /**
+     * Fully releases the service once a recording session is genuinely
+     * over (Saved or Discarded) - unbindService() alone only drops OUR
+     * binding; the service was also started via startForegroundService(),
+     * so without this it keeps running as an orphaned foreground process
+     * indefinitely. Confirmed for real: starting a second recording while
+     * the first's service instance was still alive hit onStartCommand()'s
+     * stale "already capturing" guard and silently never captured any
+     * audio, while still showing a convincing permission/notification flow.
+     *
+     * Deliberately a separate call at the two "session is over" call sites
+     * (save()/discard()) rather than folded into unbindService() itself -
+     * onCleared() also calls unbindService(), and stopping the service
+     * there would kill a still-in-progress recording just because the
+     * ViewModel got cleared (e.g. the Activity finishing while backgrounded
+     * mid-recording) - defeating the entire point of this being a
+     * foreground service in the first place (see this class's own doc
+     * comment: capture must survive that).
+     */
+    private fun stopRecordingService() {
+        val context = getApplication<Application>()
+        context.stopService(Intent(context, RecordingService::class.java))
     }
 
     override fun onCleared() {

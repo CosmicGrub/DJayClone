@@ -238,6 +238,24 @@ class RecordingService : Service() {
             audioRecord?.release()
             audioRecord = null
             val finished = outputFile
+            // Real bug, found via an actual second-recording-in-one-session
+            // test: captureJob was cancel()'d above but never nulled out.
+            // onStartCommand()'s "already capturing" guard checks
+            // captureJob != null, and a cancelled Job is still non-null - so
+            // a second recording attempt (before this service instance gets
+            // torn down) would silently skip startCapture() entirely,
+            // startForeground()'s notification and the whole permission/
+            // projection consent flow notwithstanding. Nulling these here,
+            // once teardown is actually complete, is what lets a later
+            // onStartCommand() correctly recognize "not capturing" and
+            // proceed. (RecordingViewModel.save()/discard() also now fully
+            // stopService()s once a session ends, which sidesteps this too
+            // by giving the next recording a truly fresh instance - but
+            // fixing the guard itself here is the actual root cause fix,
+            // not just a workaround for it.)
+            captureJob = null
+            writerJob = null
+            outputFile = null
             _state.value = _state.value.copy(isRecording = false, finishedFile = finished)
             stopForeground(STOP_FOREGROUND_REMOVE)
             // Service stays alive (bound) so RecordingViewModel can still
