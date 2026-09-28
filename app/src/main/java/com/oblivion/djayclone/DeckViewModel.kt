@@ -420,15 +420,12 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         val pitch = if (_state.value.keyLockEnabled) 1f else clamped
         player.playbackParameters = androidx.media3.common.PlaybackParameters(clamped, pitch)
         _state.value = _state.value.copy(playbackSpeed = clamped)
-        // Echo's tap spacing is tempo-relative (effectiveBpm() already folds
-        // in this speed change) - re-target it on every speed change
-        // (pitch nudge, sync-lock engaging/tracking) so taps stay beat-
-        // locked. The delay line's own glide (EchoAudioProcessor.GLIDE_RATE)
-        // absorbs the transition smoothly - no flush needed for a tempo
-        // change alone.
-        if (_state.value.echoActive) {
-            setEchoDivision(_state.value.echoDivisionBeats)
-        }
+        // Nothing to re-target for echo here. Its tap spacing is counted in
+        // SOURCE time from the track's base BPM (see BeatTimeMath), and
+        // Sonic - which sits after the echo in the chain - applies this speed
+        // to the taps along with everything else, so they stay beat-locked
+        // to the *effective* tempo by construction. (This used to re-target
+        // from effectiveBpm(), applying the speed a second time.)
     }
 
     /** Fine pitch nudge (e.g. +/-0.001 = +/-0.1%) - the manual "ultrafine"
@@ -521,24 +518,29 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(filterValue = clamped)
     }
 
-    /** No-op if BPM is unknown - mirrors setBeatLoop()'s effectiveBpm() ?:
-     * return guard exactly, so echo can't be armed with no tempo to sync to. */
+    /** No-op if BPM is unknown, so echo can't be armed with no tempo to sync
+     * to. Seeds the delay from the track's tempo BEFORE arming: the lit
+     * division chip is already selected on a fresh deck, but the processor's
+     * delay used to stay at 0 (a 1-sample comb filter) until a chip was
+     * actually tapped. */
     fun toggleEcho() {
-        if (_state.value.bpm == null) return
+        val bpm = _state.value.bpm ?: return
         val next = !_state.value.echoActive
+        if (next) {
+            echoProcessor.targetDelaySeconds =
+                BeatTimeMath.beatsToSourceSeconds(bpm, _state.value.echoDivisionBeats).toFloat()
+        }
         echoProcessor.enabled = next
         _state.value = _state.value.copy(echoActive = next)
     }
 
-    /** beats is one of 0.25/0.5/1.0. Uses effectiveBpm() (pitch-adjusted),
-     * same reasoning as setBeatLoop() - a beat is however long it currently
-     * plays back. No-op if BPM is unknown. */
+    /** beats is one of 0.25/0.5/1.0. Sized from the track's ANALYZED (base)
+     * BPM in source time - not effectiveBpm() - because the echo sits before
+     * Sonic in the audio chain and Sonic applies the playback speed to it;
+     * see [BeatTimeMath]. No-op if BPM is unknown. */
     fun setEchoDivision(beats: Float) {
-        val bpm = effectiveBpm() ?: return
-        val delayMs = 60_000f / bpm * beats
-        val samples = (delayMs / 1000f * echoProcessor.sampleRateHz)
-            .coerceIn(1f, (echoProcessor.capacitySamples - 1).toFloat())
-        echoProcessor.targetDelaySamples = samples
+        val bpm = _state.value.bpm ?: return
+        echoProcessor.targetDelaySeconds = BeatTimeMath.beatsToSourceSeconds(bpm, beats).toFloat()
         _state.value = _state.value.copy(echoDivisionBeats = beats)
     }
 
@@ -670,13 +672,17 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         startLoopWatcher(outMs)
     }
 
-    /** beats is one of 0.25/0.5/1/2/4/8. Uses effectiveBpm() (pitch-adjusted),
-     * not raw state.bpm - a beat is however long it currently plays back, so
-     * pitch nudges and sync-lock still produce a musically correct loop
-     * length. No-op if BPM is unknown (isAnalyzing or detection failed). */
+    /** beats is one of 0.25/0.5/1/2/4/8. Loop points are player positions,
+     * which are SOURCE time (they advance at file speed whatever the playback
+     * speed is), so the length comes from the ANALYZED (base) BPM, not
+     * effectiveBpm(): the speed is applied to the audio downstream, so a
+     * source-time beat already plays as one beat of the effective tempo.
+     * Using the speed-adjusted BPM here applied the speed twice - a "1 beat"
+     * loop at 88% speed was 12% too short. See [BeatTimeMath]. No-op if BPM
+     * is unknown (isAnalyzing or detection failed). */
     fun setBeatLoop(beats: Float) {
-        val bpm = effectiveBpm() ?: return
-        val lengthMs = (60_000.0 / bpm * beats).toLong().coerceAtLeast(MIN_LOOP_MS)
+        val bpm = _state.value.bpm ?: return
+        val lengthMs = BeatTimeMath.beatsToSourceMs(bpm, beats).toLong().coerceAtLeast(MIN_LOOP_MS)
         val inMs = player.currentPosition
         var outMs = inMs + lengthMs
         val dur = _state.value.durationMs

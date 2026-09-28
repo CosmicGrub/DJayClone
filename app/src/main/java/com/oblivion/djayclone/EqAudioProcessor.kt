@@ -76,13 +76,18 @@ class EqAudioProcessor : BaseAudioProcessor() {
         return inputAudioFormat
     }
 
-    // Active whenever any band (published target OR still-slewing live
-    // value) is off unity - same "tail end of a slew-to-zero still
-    // processes" reasoning as FilterAudioProcessor.
-    override fun isActive(): Boolean =
-        abs(targetLowDb) >= DEAD_ZONE_DB || abs(liveLowDb) >= DEAD_ZONE_DB ||
-            abs(targetMidDb) >= DEAD_ZONE_DB || abs(liveMidDb) >= DEAD_ZONE_DB ||
-            abs(targetHighDb) >= DEAD_ZONE_DB || abs(liveHighDb) >= DEAD_ZONE_DB
+    // No isActive() override, on purpose. Media3 reads isActive() only inside
+    // configure()/flush(), and DefaultAudioSink flushes only on a seek, an
+    // AudioTrack re-init, or a speed/pitch change - so a processor that
+    // reports itself inactive at 0 dB stays OUT of the chain when the DJ
+    // moves an EQ knob mid-play, until something unrelated flushes it. This
+    // class is active for as long as it is configured, always consumes its
+    // input, and does "flat" by copying the input through untouched.
+
+    private fun isIdle(): Boolean =
+        abs(targetLowDb) < DEAD_ZONE_DB && abs(liveLowDb) < DEAD_ZONE_DB &&
+            abs(targetMidDb) < DEAD_ZONE_DB && abs(liveMidDb) < DEAD_ZONE_DB &&
+            abs(targetHighDb) < DEAD_ZONE_DB && abs(liveHighDb) < DEAD_ZONE_DB
 
     override fun queueInput(inputBuffer: ByteBuffer) {
         val remaining = inputBuffer.remaining()
@@ -98,10 +103,20 @@ class EqAudioProcessor : BaseAudioProcessor() {
         if (abs(liveLowDb - targetLowDb) < 0.01f) liveLowDb = targetLowDb
         if (abs(liveMidDb - targetMidDb) < 0.01f) liveMidDb = targetMidDb
         if (abs(liveHighDb - targetHighDb) < 0.01f) liveHighDb = targetHighDb
-        recomputeCoefficients()
 
         val outputBuffer = replaceOutputBuffer(remaining)
         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+
+        if (isIdle()) {
+            // Flat: bit-exact copy. A flat biquad chain is the identity, whose
+            // DF2T state is zero, so keeping the state at rest here means the
+            // first non-flat buffer starts from exactly the right state.
+            clearState()
+            outputBuffer.put(inputBuffer)
+            outputBuffer.flip()
+            return
+        }
+        recomputeCoefficients()
 
         while (inputBuffer.hasRemaining()) {
             for (ch in 0 until channelCount) {
@@ -123,26 +138,59 @@ class EqAudioProcessor : BaseAudioProcessor() {
                 highZ2[ch] = highB2 * x - highA2 * y
                 x = y
 
-                val clamped = x.coerceIn(-1f, 1f)
-                outputBuffer.putShort(Math.round(clamped * 32767f).toShort())
+                // Symmetric with the /32768 on the way in.
+                outputBuffer.putShort(Math.round(x * 32768f).coerceIn(-32768, 32767).toShort())
             }
         }
+        sanitizeState()
         outputBuffer.flip()
     }
 
     private fun recomputeCoefficients() {
-        computeLowShelf(LOW_FREQ_HZ, liveLowDb)
-        computePeaking(MID_FREQ_HZ, MID_Q, liveMidDb)
-        computeHighShelf(HIGH_FREQ_HZ, liveHighDb)
+        // Keep every corner safely under Nyquist for low-rate sources.
+        val maxHz = MAX_CORNER_FRACTION_OF_FS * sampleRateHz
+        computeLowShelf(minOf(LOW_FREQ_HZ, maxHz), liveLowDb)
+        computePeaking(minOf(MID_FREQ_HZ, maxHz), MID_Q, liveMidDb)
+        computeHighShelf(minOf(HIGH_FREQ_HZ, maxHz), liveHighDb)
     }
 
-    /** RBJ Audio EQ Cookbook - low shelf, shelf slope S=1 (the cookbook's
-     * own "as steep as it can be without overshoot" default). */
+    /** RBJ Audio EQ Cookbook shelf alpha for slope S=1 (the cookbook's own
+     * "as steep as it can be without overshoot" setting):
+     *   alpha = sin(w0)/2 * sqrt((A + 1/A) * (1/S - 1) + 2)
+     * and at S=1 the (1/S - 1) term is ZERO, leaving sin(w0)/2 * sqrt(2).
+     * This used to multiply that term by 1 instead of 0, which is S = 0.5:
+     * a shelf that reached only -22.7 dB at 60 Hz for a -26 dB kill (correct:
+     * -25.7) while leaking -3.5 dB into 1 kHz. */
+    private fun shelfAlpha(sinw0: Float): Float = sinw0 / 2f * sqrt(2f)
+
+    /** Non-finite or denormal-sized state -> rest. */
+    private fun sanitizeState() {
+        sanitize(lowZ1); sanitize(lowZ2)
+        sanitize(midZ1); sanitize(midZ2)
+        sanitize(highZ1); sanitize(highZ2)
+    }
+
+    private fun sanitize(arr: FloatArray) {
+        for (i in arr.indices) {
+            val v = arr[i]
+            if (!(abs(v) < STATE_LIMIT) || abs(v) < DENORMAL_FLOOR) arr[i] = 0f
+        }
+    }
+
+    private fun clearState() {
+        if (::lowZ1.isInitialized) {
+            lowZ1.fill(0f); lowZ2.fill(0f)
+            midZ1.fill(0f); midZ2.fill(0f)
+            highZ1.fill(0f); highZ2.fill(0f)
+        }
+    }
+
+    /** RBJ Audio EQ Cookbook - low shelf, shelf slope S=1. */
     private fun computeLowShelf(freqHz: Float, gainDb: Float) {
         val a = 10f.pow(gainDb / 40f)
         val w0 = 2f * PI.toFloat() * freqHz / sampleRateHz
         val cosw0 = cos(w0); val sinw0 = sin(w0)
-        val alpha = sinw0 / 2f * sqrt((a + 1f / a) * 1f + 2f) // S=1 => (1/S - 1) = 0
+        val alpha = shelfAlpha(sinw0)
         val twoSqrtAAlpha = 2f * sqrt(a) * alpha
 
         val b0 = a * ((a + 1f) - (a - 1f) * cosw0 + twoSqrtAAlpha)
@@ -161,7 +209,7 @@ class EqAudioProcessor : BaseAudioProcessor() {
         val a = 10f.pow(gainDb / 40f)
         val w0 = 2f * PI.toFloat() * freqHz / sampleRateHz
         val cosw0 = cos(w0); val sinw0 = sin(w0)
-        val alpha = sinw0 / 2f * sqrt((a + 1f / a) * 1f + 2f)
+        val alpha = shelfAlpha(sinw0)
         val twoSqrtAAlpha = 2f * sqrt(a) * alpha
 
         val b0 = a * ((a + 1f) + (a - 1f) * cosw0 + twoSqrtAAlpha)
@@ -193,17 +241,19 @@ class EqAudioProcessor : BaseAudioProcessor() {
         midA1 = a1 / a0; midA2 = a2 / a0
     }
 
-    override fun onFlush() {
-        if (::lowZ1.isInitialized) {
-            lowZ1.fill(0f); lowZ2.fill(0f)
-            midZ1.fill(0f); midZ2.fill(0f)
-            highZ1.fill(0f); highZ2.fill(0f)
-        }
-    }
+    // Deliberately NO onFlush override: Media3 flushes on every seek, AudioTrack
+    // re-init and speed change, and zeroing the biquad state there puts a
+    // step into the output on every tempo nudge.
 
     override fun onReset() {
-        liveLowDb = 0f; liveMidDb = 0f; liveHighDb = 0f
-        targetLowDb = 0f; targetMidDb = 0f; targetHighDb = 0f
+        // ExoPlayer resets the sink when the audio renderer is disabled or
+        // reset (stop(), release, some stream changes). A plain same-format
+        // track reload only flushes it - measured on a real device - so this
+        // is defensive rather than a fix for a reported drop. Only audio-
+        // thread state goes: the EQ targets are UI state ("Keep FX across
+        // track load"), and the deck UI keeps showing them, so a reset must
+        // not silently zero what the audio is doing.
+        clearState()
     }
 
     companion object {
@@ -215,5 +265,8 @@ class EqAudioProcessor : BaseAudioProcessor() {
         private const val HIGH_FREQ_HZ = 4000f
         private const val DEAD_ZONE_DB = 0.1f
         private const val SMOOTHING = 0.35f
+        private const val MAX_CORNER_FRACTION_OF_FS = 0.45f
+        private const val STATE_LIMIT = 1e6f
+        private const val DENORMAL_FLOOR = 1e-15f
     }
 }

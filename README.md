@@ -44,7 +44,8 @@ The app is a single Gradle module (`app/`). A few entry points worth knowing abo
 - `MainActivity.kt` — the mixer UI and its three width/posture-based arrangements (Compact, Medium/Expanded, TableTop).
 - `DeckViewModel.kt` — per-deck playback state and the ExoPlayer/Media3 wiring.
 - `DjFxRenderersFactory.kt` — the per-deck audio FX processor chain (level → EQ → filter → echo).
-- `AudioAnalyzer.kt` / `Fft.kt` / `KeyDetector.kt` / `TempoSyncMath.kt` — the audio-analysis/DSP layer. These have no Android dependencies and are covered by real JVM unit tests (`app/src/test`).
+- `AudioAnalyzer.kt` / `Fft.kt` / `KeyDetector.kt` / `TempoSyncMath.kt` / `BeatTimeMath.kt` — the audio-analysis/DSP layer. `KeyDetector` and `BeatTimeMath` are covered by JVM unit tests; `AudioAnalyzer` and `TempoSyncMath` are not yet.
+- `EqAudioProcessor.kt` / `FilterAudioProcessor.kt` / `EchoAudioProcessor.kt` / `LevelAudioProcessor.kt` — the per-deck Media3 audio processors. `FxPipelineTest` drives them through Media3's real `AudioProcessingPipeline` on the JVM (see `PipelineRig.kt`), replaying the way `DefaultAudioSink` drives the chain, so activation, neutrality, EQ shape and time-base behaviour are checked without a device.
 - `TrackLibraryRepository.kt` / `TrackCacheRepository.kt` — the track library (MediaStore-backed) and its small local cache (BPM, key, thumbnails).
 - `DjAdaptive.kt` — the adaptive-layout signals (window size class and foldable posture) that drive which mixer arrangement renders.
 

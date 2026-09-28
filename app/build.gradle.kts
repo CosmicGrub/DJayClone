@@ -11,8 +11,8 @@ android {
         applicationId = "com.oblivion.djayclone"
         minSdk = 26
         targetSdk = 34
-        versionCode = 14
-        versionName = "0.13.1" // Stages 1-10c complete: playback, mixing, BPM sync,
+        versionCode = 17
+        versionName = "0.14.0" // Stages 1-10c complete: playback, mixing, BPM sync,
         // cue/loop/hot-cues, live-mix recording + export, filter/echo FX,
         // adjustable settings, track library, adaptive tablet/foldable
         // layout including the TableTop posture-aware arrangement (the one
@@ -51,6 +51,12 @@ android {
 
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
+    }
+
+    testOptions {
+        // Media3's common classes touch android.util.Log on a few paths;
+        // the JVM pipeline tests (FxPipelineTest) must not die on "not mocked".
+        unitTests.isReturnDefaultValues = true
     }
 }
 
