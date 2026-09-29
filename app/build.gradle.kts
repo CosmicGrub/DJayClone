@@ -11,8 +11,8 @@ android {
         applicationId = "com.oblivion.djayclone"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "0.14.0" // Stages 1-10c complete: playback, mixing, BPM sync,
+        versionCode = 18
+        versionName = "0.15.0" // Stages 1-10c complete: playback, mixing, BPM sync,
         // cue/loop/hot-cues, live-mix recording + export, filter/echo FX,
         // adjustable settings, track library, adaptive tablet/foldable
         // layout including the TableTop posture-aware arrangement (the one
@@ -20,7 +20,8 @@ android {
         // was) - plus the parallel Audio Engineering track: 3-band EQ,
         // spectral waveform, VU meter, Tempo-Sync v1 (ratio-aware
         // half/double-time), Key Detection (Camelot notation), Key Lock,
-        // and now Auto Gain (attenuation-only level normalization on load).
+        // Auto Gain (attenuation-only level normalization on load, now a
+        // separate trim from the GAIN fader), and exact MP3 seeking.
     }
 
     buildTypes {

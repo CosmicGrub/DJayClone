@@ -426,13 +426,15 @@ fun MixerScreen(
     // matches how a physical mixer's crossfader doesn't jump on its own.
     var crossfader by remember { mutableStateOf(settings.defaultCrossfaderPosition) } // 0 = full A, 1 = full B
 
-    // Equal-power crossfade combined with each deck's own channel fader.
-    LaunchedEffect(crossfader, stateA.gain, stateB.gain) {
+    // Equal-power crossfade combined with each deck's own channel fader and
+    // its Auto Gain trim (see DeckUiState.autoGainTrim's own doc for why
+    // that's a separate multiplier from gain, not folded into it).
+    LaunchedEffect(crossfader, stateA.gain, stateA.autoGainTrim, stateB.gain, stateB.autoGainTrim) {
         val x = crossfader.toDouble()
         val factorA = cos(x * HALF_PI).toFloat()
         val factorB = sin(x * HALF_PI).toFloat()
-        deckA.setEffectiveVolume(stateA.gain * factorA)
-        deckB.setEffectiveVolume(stateB.gain * factorB)
+        deckA.setEffectiveVolume(stateA.gain * stateA.autoGainTrim * factorA)
+        deckB.setEffectiveVolume(stateB.gain * stateB.autoGainTrim * factorB)
     }
 
     // Continuous sync lock: once engaged, the follower deck keeps tracking

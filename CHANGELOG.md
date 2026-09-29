@@ -1,5 +1,14 @@
 # Changelog
 
+## [v0.15.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.15.0) - 2026-09-28
+
+Two more items from the same audit that produced v0.14.0.
+
+- **Fixed: Auto Gain silently overwrote the GAIN fader.** Since v0.13.0, loading a loud track moved the GAIN slider itself to the auto-calculated level - visually indistinguishable from you having dragged it there. Auto Gain's attenuation is now a separate internal trim: the GAIN slider always shows exactly what you set it to, and the trim is applied underneath. Verified on a real tablet: after loading a loud test tone, the GAIN slider stayed at full while `dumpsys media.audio_flinger` showed the deck's actual playback volume at 0.279083 - exactly `gain(1.0) x trim(0.3947) x crossfaderFactor(0.7071)`.
+- **Fixed: seeking on a VBR MP3 could land noticeably off-target** (cues, loops and hot cues are all seeks). By default Media3's MP3 extractor estimates a seek position from the bitrate of whatever it has already decoded, or from an encoder's approximate seek-table header when present - both coarse. The extractor now builds an exact seek index instead (`Mp3Extractor.FLAG_ENABLE_INDEX_SEEKING`, confirmed by inspecting the library's own bytecode: this switches it from the approximate `XingSeeker`/estimation path to the exact `IndexSeeker` regardless of whether a Xing/VBRI header is present). Every other container Media3 handles was already exact.
+
+Also found along the way: recording an already-loud deck showed the recorded level was undiminished by GAIN, the crossfader, or Auto Gain - confirming the audit's separate suspicion that the mix recorder captures pre-fader audio. Not fixed here; tracked as its own item.
+
 ## [v0.14.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.14.0) - 2026-09-28
 
 **Audio-path correctness release.** Found by a code audit and confirmed on a real tablet by recording the app's own output and measuring it - before this release, moving FILTER to full low-pass left an 8 kHz tone at full level for ~9 s, and it collapsed (-65 dB) only when an unrelated tempo nudge happened to flush the audio chain.

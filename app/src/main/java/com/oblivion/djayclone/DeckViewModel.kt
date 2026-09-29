@@ -10,6 +10,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.mp3.Mp3Extractor
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +38,16 @@ data class DeckUiState(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val gain: Float = 1f,
+    // Auto Gain's measured attenuation (0f..1f, see AudioAnalyzer.
+    // estimateAutoGain), applied as a SEPARATE multiplicative trim rather
+    // than by overwriting [gain] - the GAIN slider is the DJ's own control
+    // and must always show exactly what the DJ set it to. Not exposed on any
+    // slider itself; see DeckViewModel.effectiveVolumeFactor. Always 1f
+    // (no-op) unless a measurement was applied - see loadTrack(). Reset to
+    // 1f on every load, unlike gain/filterValue/echoActive, because it is a
+    // per-TRACK measurement, not a per-deck performance setting a DJ would
+    // expect to carry across a track change the way Keep FX does.
+    val autoGainTrim: Float = 1f,
     val error: String? = null,
     val waveform: FloatArray? = null,
     val spectral: SpectralWaveform? = null,   // null until analysis completes; see AudioAnalyzer
@@ -139,10 +152,26 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
     // Stage 8: user-adjustable FX ranges, hot cue count, playback defaults.
     private val settingsRepository = SettingsRepository.get(application)
 
+    // Real device library confirmed this is needed: a plain MP3 extractor
+    // configuration seeks a VBR file by interpolating from the bitrate of
+    // whatever it has already read, which can land up to roughly a second or
+    // two off on a real VBR rip - directly wrong for cues, loops and hot cues,
+    // all of which are seekTo() calls. FLAG_ENABLE_INDEX_SEEKING switches
+    // Mp3Extractor to its IndexSeeker, which builds an exact seek table
+    // (fast, from a Xing/VBRI header when the encoder wrote one; a one-time
+    // frame scan when it didn't) instead of estimating - no other app code is
+    // needed for that scan, Mp3Extractor does it internally. Every other
+    // container Media3 handles natively already seeks exactly.
+    private val mediaSourceFactory = DefaultMediaSourceFactory(
+        application,
+        DefaultExtractorsFactory().setMp3ExtractorFlags(Mp3Extractor.FLAG_ENABLE_INDEX_SEEKING)
+    )
+
     val player: ExoPlayer = ExoPlayer.Builder(
         application,
         DjFxRenderersFactory(application, filterProcessor, echoProcessor, levelProcessor, eqProcessor)
     )
+        .setMediaSourceFactory(mediaSourceFactory)
         .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ false)
         .build()
 
@@ -306,6 +335,10 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             playbackSpeed = 1f,
             albumArt = null,
             uri = uri,
+            // Always reset here - see the field's own doc comment for why
+            // this is a per-track measurement, not a persisted setting.
+            // Re-applied below once the new track's analysis completes.
+            autoGainTrim = 1f,
             // Stage 8: cue/loop positions only reset when
             // persistLoopsAndCuesAcrossLoad is false (the default, matching
             // this app's original behavior exactly). When true, positions
@@ -372,15 +405,17 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             }
             // Auto Gain: the measured value is always cached (same
             // unconditional-cache philosophy as BPM/key above - it's just a
-            // recorded measurement), but only actually APPLIED to the deck's
-            // gain when the setting is on. Unlike BPM/key, this one changes
-            // real on-load deck behavior, so it needs the same settings-gate
-            // as persistLoopsAndCues/persistFx above rather than always
-            // taking effect unconditionally.
+            // recorded measurement), but only actually APPLIED as a trim
+            // when the setting is on. Unlike BPM/key, this one changes real
+            // on-load deck behavior, so it needs the same settings-gate as
+            // persistLoopsAndCues/persistFx above rather than always taking
+            // effect unconditionally. Applied to [autoGainTrim], NOT [gain] -
+            // the GAIN slider is the DJ's own control and must never move on
+            // its own or silently disagree with what it visibly shows.
             if (result?.autoGain != null) {
                 TrackCacheRepository.get(getApplication()).setCachedAutoGain(TrackId.from(uri), result.autoGain)
                 if (settings.autoGainEnabled) {
-                    _state.value = _state.value.copy(gain = result.autoGain)
+                    _state.value = _state.value.copy(autoGainTrim = result.autoGain)
                 }
             }
             // Echo's on/off + division setting persists across track loads
@@ -473,9 +508,12 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
 
     fun seekTo(ms: Long) = player.seekTo(ms)
 
-    /** Channel fader value only (0..1). Actual player volume is computed
-     * externally as channelFader * crossfaderFactor via [setEffectiveVolume],
-     * so the mixer can combine per-deck gain with crossfader position. */
+    /** Channel fader value only (0..1) - the DJ's own control. Actual player
+     * volume is computed externally as
+     * gain * autoGainTrim * crossfaderFactor
+     * via [setEffectiveVolume] (see [DeckUiState.autoGainTrim] for why that
+     * trim is a separate multiplier and not folded into this field), so the
+     * mixer can combine per-deck gain with crossfader position. */
     fun setGain(gain: Float) {
         _state.value = _state.value.copy(gain = gain)
     }
