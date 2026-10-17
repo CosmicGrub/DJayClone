@@ -34,6 +34,12 @@ data class RecordingUiState(
     val hasPendingRecording: Boolean = false, // stopped, unsaved, awaiting Save/Discard
     val isSaving: Boolean = false,
     val error: String? = null,
+    /** Time of recording the free space allows (Save counted); null until measured. */
+    val storageRemainingMs: Long? = null,
+    val storageLevel: StorageBudget.Level = StorageBudget.Level.OK,
+    val gapCount: Int = 0,
+    /** The pending take is one found after a crash/kill, not one just stopped. */
+    val recovered: Boolean = false,
 )
 
 /**
@@ -54,6 +60,11 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _state = MutableStateFlow(RecordingUiState())
     val state: StateFlow<RecordingUiState> = _state.asStateFlow()
+
+    init {
+        recoverUnfinishedTake()
+        refreshIdleStorage()
+    }
 
     private var boundService: RecordingService? = null
     private var pendingFile: File? = null
@@ -95,6 +106,9 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                             elapsedMs = s.elapsedMs,
                             hasPendingRecording = s.finishedFile != null,
                             error = s.error ?: _state.value.error,
+                            storageRemainingMs = s.storageRemainingMs ?: _state.value.storageRemainingMs,
+                            storageLevel = s.storageLevel,
+                            gapCount = s.gapCount,
                         )
                     }
                 }
@@ -118,14 +132,69 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     fun discard() {
         pendingFile?.delete()
         pendingFile = null
-        _state.value = _state.value.copy(hasPendingRecording = false)
+        _state.value = _state.value.copy(hasPendingRecording = false, recovered = false, elapsedMs = 0L)
         unbindService()
         stopRecordingService()
+        recoverUnfinishedTake() // an older unfinished take may be waiting behind this one
+    }
+
+    /** Free space for the idle "Space for about ..." line. */
+    fun refreshIdleStorage() {
+        if (_state.value.isRecording) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val dir = RecordingService.recordingsDir(getApplication())
+            val free = android.os.StatFs(dir.path).availableBytes
+            val ms = StorageBudget.remainingMs(free, StorageBudget.RESERVE_BYTES, StorageBudget.bytesPerSecond(48000, 2), 2)
+            _state.value = _state.value.copy(storageRemainingMs = ms, storageLevel = StorageBudget.level(ms, StorageBudget.shouldStop(free)))
+        }
+    }
+
+    /**
+     * A take left behind by a crash, a kill or a reboot: any WAV in the
+     * recordings folder that is not the one being recorded right now. Its
+     * header is repaired from the real file length (the writer re-patches it
+     * every ~2 s, so at most a few seconds are missing) and it is offered
+     * through the normal Save/Discard row. Under a second of audio is junk
+     * and deleted. One take at a time; the rest queue behind it.
+     */
+    private fun recoverUnfinishedTake() {
+        if (RecordingService.running || pendingFile != null || _state.value.isRecording) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val dir = RecordingService.recordingsDir(getApplication())
+            val candidates = dir.listFiles { f -> f.isFile && f.name.endsWith(".wav") }?.sortedByDescending { it.lastModified() } ?: return@launch
+            for (f in candidates) {
+                val marker = File(dir, f.name + ".active")
+                try {
+                    val head = ByteArray(WavHeader.SIZE)
+                    val ok = f.inputStream().use { it.read(head) == WavHeader.SIZE }
+                    val fixed = if (ok) WavHeader.repaired(head, f.length()) else null
+                    val info = fixed?.let { WavHeader.parse(it) }
+                    val audioMs = info?.let { WavHeader.durationMs(it, f.length() - WavHeader.SIZE) } ?: 0L
+                    if (fixed == null || info == null || audioMs < 1000) {
+                        f.delete(); marker.delete()
+                        continue
+                    }
+                    java.io.RandomAccessFile(f, "rw").use { it.seek(0); it.write(fixed) }
+                    marker.delete()
+                    pendingFile = f
+                    _state.value = _state.value.copy(hasPendingRecording = true, elapsedMs = audioMs, recovered = true)
+                    return@launch
+                } catch (_: Exception) {
+                    // unreadable: leave it for a later launch rather than delete data we could not inspect
+                }
+            }
+        }
     }
 
     fun save() {
         val file = pendingFile ?: return
         if (_state.value.isSaving) return
+        val needed = StorageBudget.saveNeeds(file.length())
+        val free = android.os.StatFs(file.parentFile?.path ?: getApplication<Application>().filesDir.path).availableBytes
+        if (free < needed) {
+            _state.value = _state.value.copy(error = "Not enough free space to save (needs ${needed / (1024 * 1024)} MB). Free some space and try again.")
+            return
+        }
         _state.value = _state.value.copy(isSaving = true, error = null)
         viewModelScope.launch(Dispatchers.IO) {
             val context = getApplication<Application>()
@@ -149,9 +218,10 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                 resolver.update(uri, values, null, null)
                 file.delete()
                 pendingFile = null
-                _state.value = _state.value.copy(isSaving = false, hasPendingRecording = false)
+                _state.value = _state.value.copy(isSaving = false, hasPendingRecording = false, recovered = false, elapsedMs = 0L)
                 unbindService()
                 stopRecordingService()
+                recoverUnfinishedTake()
             } catch (e: IOException) {
                 // Don't leave an orphaned IS_PENDING row in the user's Music
                 // library if the copy itself failed partway through.

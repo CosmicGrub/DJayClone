@@ -14,6 +14,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -323,6 +324,12 @@ class MainActivity : ComponentActivity() {
                             dismissButton = { TextButton(onClick = { pendingLoad = null }) { Text("Cancel") } },
                         )
                     }
+                    val recUi by recording.state.collectAsState()
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        if (screen != AppScreen.MIXER && recUi.isRecording) {
+                            RecordingStrip(elapsedMs = recUi.elapsedMs, level = recUi.storageLevel, onReturn = { screen = AppScreen.MIXER })
+                        }
+                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     when (screen) {
                         AppScreen.SETTINGS -> {
                             BackHandler { screen = AppScreen.MIXER }
@@ -368,6 +375,8 @@ class MainActivity : ComponentActivity() {
                                 onAddFromFiles = { addToLibraryLauncher.launch(arrayOf("audio/*")) },
                                 onRequestLibraryPermission = { ensureLibraryPermission() },
                             )
+                        }
+                    }
                         }
                     }
                 }
@@ -1493,6 +1502,29 @@ private fun CenterMixColumn(
 @Composable
 private fun RecordRow(state: RecordingUiState, recording: RecordingViewModel, onStart: () -> Unit) {
     var showRationale by remember { mutableStateOf(false) }
+    var stopArmedAt by remember { mutableStateOf<Long?>(null) }
+    var confirmDiscard by remember { mutableStateOf(false) }
+    // The "tap again" prompt reverts by itself after its window.
+    LaunchedEffect(stopArmedAt) {
+        val armed = stopArmedAt ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(StopGuard.WINDOW_MS)
+        if (stopArmedAt == armed) stopArmedAt = null
+    }
+    val levelColor = when (state.storageLevel) {
+        StorageBudget.Level.OK -> Color.Gray
+        StorageBudget.Level.WARN -> Color(0xFFFFB74D)
+        else -> Color(0xFFFF5A7A)
+    }
+
+    if (confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = { confirmDiscard = false },
+            title = { Text("Discard ${TransportMath.formatClock(state.elapsedMs)} recording?") },
+            text = { Text("It cannot be recovered.") },
+            confirmButton = { TextButton(onClick = { confirmDiscard = false; recording.discard() }) { Text("DISCARD") } },
+            dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("KEEP") } },
+        )
+    }
 
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when {
@@ -1506,26 +1538,49 @@ private fun RecordRow(state: RecordingUiState, recording: RecordingViewModel, on
 
             state.isRecording -> {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { recording.stop() }) {
+                    val armed = StopGuard.stillArmed(android.os.SystemClock.elapsedRealtime(), stopArmedAt)
+                    TextButton(onClick = {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        when (val r = StopGuard.onTap(now, state.elapsedMs, stopArmedAt)) {
+                            is StopGuard.Result.Confirmed -> { stopArmedAt = null; recording.stop() }
+                            is StopGuard.Result.Armed -> stopArmedAt = r.armedAt
+                        }
+                    }) {
                         Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color.Red, modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("STOP", color = Color.White, style = MaterialTheme.typography.labelSmall)
+                        Text(
+                            if (armed) "TAP AGAIN TO STOP" else "STOP",
+                            color = if (armed) Color(0xFFFFB74D) else Color.White,
+                            style = MaterialTheme.typography.labelSmall
+                        )
                     }
-                    Text(format(state.elapsedMs), color = Color.Gray, style = MaterialTheme.typography.labelSmall)
+                    Text(TransportMath.formatClock(state.elapsedMs), color = Color.Gray, style = MaterialTheme.typography.labelSmall)
+                    state.storageRemainingMs?.let {
+                        Text("${StorageBudget.format(it)} left", color = levelColor, style = MaterialTheme.typography.labelSmall)
+                    }
+                    if (state.gapCount > 0) {
+                        Text("${state.gapCount} glitch${if (state.gapCount == 1) "" else "es"}", color = Color(0xFFFFB74D), style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
 
             state.hasPendingRecording -> {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Recorded ${format(state.elapsedMs)}",
+                        (if (state.recovered) "Recovered " else "Recorded ") + TransportMath.formatClock(state.elapsedMs),
                         color = Color.Gray,
                         style = MaterialTheme.typography.labelSmall
                     )
                     TextButton(onClick = { recording.save() }, enabled = !state.isSaving) {
                         Text(if (state.isSaving) "SAVING…" else "SAVE", color = AccentA, style = MaterialTheme.typography.labelSmall)
                     }
-                    TextButton(onClick = { recording.discard() }, enabled = !state.isSaving) {
+                    TextButton(
+                        onClick = {
+                            if (DiscardPolicy.needsConfirm(state.elapsedMs, alreadySaved = false)) confirmDiscard = true
+                            else recording.discard()
+                        },
+                        enabled = !state.isSaving
+                    ) {
                         Text("DISCARD", color = Color.Gray, style = MaterialTheme.typography.labelSmall)
                     }
                 }
@@ -1535,7 +1590,7 @@ private fun RecordRow(state: RecordingUiState, recording: RecordingViewModel, on
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
                         "Android will show its screen-recording permission prompt to authorize audio " +
-                            "capture — only the mix audio is recorded, nothing on screen.",
+                            "capture — only this app's mix audio is recorded, nothing on screen and nothing from other apps.",
                         color = Color.Gray,
                         style = MaterialTheme.typography.labelSmall
                     )
@@ -1549,10 +1604,15 @@ private fun RecordRow(state: RecordingUiState, recording: RecordingViewModel, on
             }
 
             else -> {
-                TextButton(onClick = { showRationale = true }) {
-                    Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color.Red, modifier = Modifier.size(14.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("REC", color = Color.White, style = MaterialTheme.typography.labelSmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { recording.refreshIdleStorage(); showRationale = true }) {
+                        Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color.Red, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("REC", color = Color.White, style = MaterialTheme.typography.labelSmall)
+                    }
+                    state.storageRemainingMs?.let {
+                        Text("Space for about ${StorageBudget.format(it)}", color = levelColor, style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
@@ -2171,5 +2231,35 @@ private fun resetUnlockedTempos(deckA: DeckViewModel, deckB: DeckViewModel) {
     if ('B' in targets) deckB.setPlaybackSpeed(1f) else skipped.add("B")
     if (skipped.isNotEmpty()) {
         android.widget.Toast.makeText(context, "Deck ${skipped.joinToString(" and ")} is locked - tempo kept", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** Shown over Library and Settings while a take is running, so a recording is
+ * never out of sight; tapping returns to the mixer where the guarded STOP is. */
+@Composable
+private fun RecordingStrip(elapsedMs: Long, level: StorageBudget.Level, onReturn: () -> Unit) {
+    val pulse by androidx.compose.animation.core.rememberInfiniteTransition(label = "rec").animateFloat(
+        initialValue = 1f, targetValue = 0.3f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(500), androidx.compose.animation.core.RepeatMode.Reverse
+        ),
+        label = "recPulse"
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF5A0F1E))
+            .clickable(onClickLabel = "Return to the mixer", role = Role.Button, onClick = onReturn)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color.Red.copy(alpha = pulse), modifier = Modifier.size(12.dp))
+        Text("REC ${TransportMath.formatClock(elapsedMs)}", color = Color.White, style = MaterialTheme.typography.labelMedium)
+        if (level == StorageBudget.Level.CRITICAL || level == StorageBudget.Level.STOP) {
+            Text("Low storage", color = Color(0xFFFFB74D), style = MaterialTheme.typography.labelSmall)
+        }
+        Spacer(Modifier.weight(1f))
+        Text("Tap to return to the mixer", color = Color(0xFFFFB3C1), style = MaterialTheme.typography.labelSmall)
     }
 }

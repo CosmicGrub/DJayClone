@@ -3,11 +3,14 @@ package com.oblivion.djayclone
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
@@ -15,6 +18,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +27,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,23 +35,29 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Foreground service owning the live-mix capture: MediaProjection-backed
  * AudioPlaybackCaptureConfiguration -> AudioRecord -> a bounded channel ->
- * a WAV file streamed to app-private cache storage.
+ * a WAV file streamed to app-private storage.
  *
  * Bound-and-started: startForegroundService() keeps it alive independent of
- * any Activity's lifecycle (so backgrounding the app mid-recording doesn't
- * kill capture - the whole reason a foreground service is required at all),
- * bindService() from RecordingViewModel gets a live StateFlow of progress.
+ * any Activity's lifecycle, bindService() from RecordingViewModel gets a live
+ * StateFlow of progress.
  *
- * Capture sits entirely downstream of both decks' ExoPlayer instances and
- * MixerScreen's crossfader/gain math - it captures the app's *actual*
- * summed USAGE_MEDIA output, exactly as routed to whatever output device is
- * connected right now. Nothing here needs to know decks or a crossfader
- * exist; a track ending or being swapped mid-recording just becomes silence
- * or the new track in the capture, correctly, with no special-casing.
+ * Safety properties (v0.18.0):
+ *  - Self-only: capture is restricted to this app's own UID, so other apps'
+ *    audio (a video in split screen, a notification) is never recorded.
+ *  - Crash-safe: the WAV header is re-patched every ~2 s of audio and the file
+ *    synced every ~10 s, so a kill loses at most a few seconds and the file is
+ *    playable at every moment. Files live in noBackupFilesDir (never in the
+ *    Auto Backup set) and an unfinished one is offered back on next launch.
+ *  - Timeline-true: the clock is frames written; if the writer ever falls
+ *    behind and the queue overflows, the dropped span is written back as
+ *    silence so the file stays exactly as long as real time.
+ *  - Honest: storage left is measured every 5 s and a stalled capture is
+ *    detected within 2 s and stopped visibly instead of running a dead timer.
  */
 class RecordingService : Service() {
 
@@ -55,6 +66,9 @@ class RecordingService : Service() {
         val elapsedMs: Long = 0L,
         val finishedFile: File? = null, // non-null once stopRecording() has finalized the WAV
         val error: String? = null,
+        val storageRemainingMs: Long? = null,
+        val storageLevel: StorageBudget.Level = StorageBudget.Level.OK,
+        val gapCount: Int = 0,
     )
 
     inner class LocalBinder : Binder() {
@@ -66,24 +80,35 @@ class RecordingService : Service() {
     val state: StateFlow<ServiceState> = _state.asStateFlow()
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val pcmChannel = Channel<ByteArray>(capacity = 32)
+    private var pcmChannel = Channel<ByteArray>(capacity = 64)
+    private val droppedBytes = AtomicLong(0)
 
     private var mediaProjection: MediaProjection? = null
     private var audioRecord: AudioRecord? = null
     private var captureJob: Job? = null
     private var writerJob: Job? = null
+    private var tickerJob: Job? = null
     private var outputFile: File? = null
+    private var markerFile: File? = null
     private var startTimeMs: Long = 0L
-    private var stopRequested = false
+    @Volatile private var lastFrameAt: Long? = null
+    @Volatile private var stopRequested = false
+    @Volatile private var bytesPerSec = 176_400L
+    private var lastNotifiedText: String? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        running = true
+    }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // This service is only ever started (by RecordingViewModel) once the
-        // caller has already confirmed Build.VERSION.SDK_INT >= Q - the
-        // capture APIs below simply don't exist on older devices. Re-checked
-        // here defensively (and in a form Android Lint recognizes as a
-        // version gate) rather than trusting the caller blindly.
+        // Stop pressed in the notification shade: explicit system-surface action.
+        if (intent?.action == ACTION_STOP) {
+            stopRecording()
+            return START_NOT_STICKY
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             stopSelfCleanly()
             return START_NOT_STICKY
@@ -94,30 +119,19 @@ class RecordingService : Service() {
             androidx.core.content.IntentCompat.getParcelableExtra(it, EXTRA_RESULT_DATA, Intent::class.java)
         }
 
-        // Order matters and is enforced by the OS on API 34: the foreground
-        // service (with foregroundServiceType=mediaProjection) must already
-        // be running BEFORE MediaProjectionManager.getMediaProjection() is
-        // called, not after. Calling startForeground() first, unconditionally,
-        // satisfies that even on the (extremely unlikely) restart path where
-        // resultData is missing.
-        startForeground(NOTIFICATION_ID, buildNotification(recording = false), foregroundServiceType())
+        // The foreground service (type mediaProjection) must be running BEFORE
+        // getMediaProjection() on API 34.
+        startForeground(NOTIFICATION_ID, buildNotification(recording = false, elapsedMs = 0, level = StorageBudget.Level.OK), foregroundServiceType())
 
-        if (resultData == null || captureJob != null) {
-            // No projection data (bad restart) or already capturing - nothing
-            // new to do; leave the existing state as-is rather than restart
-            // a second capture session on top of the first.
-            return START_NOT_STICKY
-        }
+        if (resultData == null || captureJob != null) return START_NOT_STICKY
 
         val projectionManager = getSystemService(MediaProjectionManager::class.java)
         val projection = projectionManager.getMediaProjection(resultCode, resultData)
         mediaProjection = projection
         projection.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
-                // The OS/user can revoke the projection out from under us (the
-                // status-bar "Stop casting" chip) - treat it exactly like a
-                // manual stopRecording() so we finalize cleanly instead of
-                // leaving AudioRecord in a broken state for the next read().
+                // The OS/user can revoke the projection (status-bar chip) -
+                // finalize cleanly instead of leaving AudioRecord broken.
                 stopRecording()
             }
         }, null)
@@ -133,9 +147,14 @@ class RecordingService : Service() {
     private fun startCapture(projection: MediaProjection) {
         val captureConfig = AudioPlaybackCaptureConfiguration.Builder(projection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+            // Only this app's own players: the decks share this UID, nothing
+            // else's audio can leak into the mix.
+            .addMatchingUid(android.os.Process.myUid())
             .build()
 
-        val sampleRate = 44100
+        val outRate = getSystemService(AudioManager::class.java)
+            ?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull()
+        val sampleRate = CaptureSpec.chooseRate(outRate)
         val channelConfig = AudioFormat.CHANNEL_IN_STEREO
         val encoding = AudioFormat.ENCODING_PCM_16BIT
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig, encoding)
@@ -170,97 +189,157 @@ class RecordingService : Service() {
             return
         }
 
-        val actualSampleRate = record.sampleRate // negotiated rate, not assumed
-        val channelCount = 2 // CHANNEL_IN_STEREO
+        val rate = record.sampleRate // negotiated rate, not assumed
+        val channelCount = 2
+        val blockAlign = channelCount * 2
+        bytesPerSec = StorageBudget.bytesPerSecond(rate, channelCount)
 
-        val file = File(cacheDir, "djayclone_rec_${System.currentTimeMillis()}.wav")
+        // ~20 s of audio of queue before anything is dropped.
+        pcmChannel = Channel(capacity = (20 * bytesPerSec / minBuf).toInt().coerceAtLeast(64))
+        droppedBytes.set(0)
+
+        val dir = recordingsDir(this)
+        val file = File(dir, "rec_${System.currentTimeMillis()}.wav")
+        val marker = File(dir, file.name + ".active")
         outputFile = file
+        markerFile = marker
+        marker.createNewFile()
         val raf = RandomAccessFile(file, "rw")
-        writeWavHeader(raf, totalPcmBytes = 0L, sampleRate = actualSampleRate, channelCount = channelCount)
+        raf.write(WavHeader.build(rate, channelCount, 16, 0))
 
         audioRecord = record
         record.startRecording()
-        startTimeMs = System.currentTimeMillis()
+        startTimeMs = SystemClock.elapsedRealtime()
+        lastFrameAt = null
         stopRequested = false
         _state.value = ServiceState(isRecording = true, elapsedMs = 0L)
+        pushNotification(0, StorageBudget.Level.OK, force = true)
 
         captureJob = serviceScope.launch {
             val readBuf = ByteArray(minBuf)
             while (isActive && !stopRequested) {
                 val n = record.read(readBuf, 0, readBuf.size)
                 if (n > 0) {
-                    pcmChannel.trySend(readBuf.copyOf(n))
-                    // Bounded channel: a persistently slow writer (contended
-                    // storage) drops the newest frames here rather than
-                    // blocking this read loop - backpressure must land on
-                    // the file, never stall capture of the live mix.
+                    lastFrameAt = SystemClock.elapsedRealtime()
+                    // Bounded: a persistently slow writer drops here rather than
+                    // stalling capture; the dropped span is written back as
+                    // silence so the timeline stays true.
+                    if (!pcmChannel.trySend(readBuf.copyOf(n)).isSuccess) droppedBytes.addAndGet(n.toLong())
                 } else if (n < 0) {
-                    break // AudioRecord error code (e.g. ERROR_DEAD_OBJECT)
+                    val code = n
+                    stopRecording("Capture stopped unexpectedly (audio error $code) - what was recorded is saved.")
+                    break
                 }
             }
         }
 
         writerJob = serviceScope.launch {
-            var totalBytes = 0L
-            for (buf in pcmChannel) {
-                raf.write(buf)
-                totalBytes += buf.size
-                val elapsed = System.currentTimeMillis() - startTimeMs
-                _state.value = _state.value.copy(elapsedMs = elapsed)
-                if (elapsed % 30_000 < 200) checkStorageHeadroom() // ~ every 30s
+            var dataBytes = 0L
+            var lastPatchBytes = 0L
+            var lastSync = SystemClock.elapsedRealtime()
+            var gaps = 0
+            val zeros = ByteArray(16384)
+            fun patch() {
+                raf.seek(0)
+                raf.write(WavHeader.build(rate, channelCount, 16, dataBytes))
+                raf.seek(WavHeader.SIZE + dataBytes)
             }
-            writeWavHeader(raf, totalPcmBytes = totalBytes, sampleRate = actualSampleRate, channelCount = channelCount)
-            raf.close()
+            try {
+                for (buf in pcmChannel) {
+                    val gap = (droppedBytes.getAndSet(0) / blockAlign) * blockAlign
+                    if (gap > 0) {
+                        var left = gap
+                        while (left > 0) {
+                            val n = minOf(left, zeros.size.toLong()).toInt()
+                            raf.write(zeros, 0, n)
+                            left -= n
+                        }
+                        dataBytes += gap
+                        gaps++
+                    }
+                    val room = WavHeader.maxDataBytes(blockAlign) - dataBytes
+                    val take = minOf(buf.size.toLong(), room).toInt()
+                    if (take > 0) raf.write(buf, 0, take)
+                    dataBytes += take
+                    _state.value = _state.value.copy(
+                        elapsedMs = CaptureClock.elapsedMs(dataBytes / blockAlign, rate),
+                        gapCount = gaps,
+                    )
+                    if (dataBytes - lastPatchBytes >= 2 * bytesPerSec) {
+                        patch(); lastPatchBytes = dataBytes
+                    }
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastSync >= 10_000) {
+                        raf.fd.sync(); lastSync = now
+                    }
+                    if (take < buf.size || WavHeader.isAtLimit(dataBytes, blockAlign)) {
+                        stopRecording("Stopped at the 4 GB WAV limit - your recording is saved.")
+                    }
+                }
+            } finally {
+                try {
+                    patch()
+                    raf.fd.sync()
+                } catch (_: Exception) { }
+                try { raf.close() } catch (_: Exception) { }
+                marker.delete()
+            }
         }
-    }
 
-    private fun checkStorageHeadroom() {
-        val stat = android.os.StatFs(cacheDir.path)
-        val freeBytes = stat.availableBytes
-        if (freeBytes < 50L * 1024 * 1024) {
-            _state.value = _state.value.copy(error = "Low storage - recording stopped automatically.")
-            stopRecording()
+        tickerJob = serviceScope.launch {
+            var tick = 0
+            while (isActive && !stopRequested) {
+                delay(1000)
+                val now = SystemClock.elapsedRealtime()
+                if (CaptureWatchdog.isStalled(now, startTimeMs, lastFrameAt)) {
+                    stopRecording("Capture stopped unexpectedly - what was recorded is saved.")
+                    break
+                }
+                if (tick % 5 == 0) {
+                    val free = android.os.StatFs(dir.path).availableBytes
+                    val stop = StorageBudget.shouldStop(free)
+                    val remaining = StorageBudget.remainingMs(free, StorageBudget.RESERVE_BYTES, bytesPerSec, 2)
+                    val level = StorageBudget.level(remaining, stop)
+                    _state.value = _state.value.copy(storageRemainingMs = remaining, storageLevel = level)
+                    if (stop) {
+                        stopRecording("Stopped: storage nearly full - your recording up to this point is saved.")
+                        break
+                    }
+                }
+                if (tick % 10 == 0) pushNotification(_state.value.elapsedMs, _state.value.storageLevel, force = false)
+                tick++
+            }
         }
     }
 
     /** Stops capture, finalizes the WAV header, and transitions to the
-     * stopped/pending-save state. Safe to call more than once (e.g. both a
-     * manual Stop tap and a race with MediaProjection.Callback.onStop()). */
-    fun stopRecording() {
+     * stopped/pending-save state. Safe to call more than once. [reason], if
+     * given, is shown as the error line while the take stays Save/Discard-able. */
+    fun stopRecording(reason: String? = null) {
         if (stopRequested) return
         stopRequested = true
-        audioRecord?.stop() // unblocks any in-flight blocking read()
+        if (reason != null) _state.value = _state.value.copy(error = reason)
+        try { audioRecord?.stop() } catch (_: IllegalStateException) { } // unblocks an in-flight read()
         captureJob?.cancel()
-        pcmChannel.close() // lets the writer's `for (buf in pcmChannel)` loop drain and exit
+        tickerJob?.cancel()
+        pcmChannel.close() // lets the writer drain and exit
 
         serviceScope.launch {
             writerJob?.join()
             audioRecord?.release()
             audioRecord = null
             val finished = outputFile
-            // Real bug, found via an actual second-recording-in-one-session
-            // test: captureJob was cancel()'d above but never nulled out.
-            // onStartCommand()'s "already capturing" guard checks
-            // captureJob != null, and a cancelled Job is still non-null - so
-            // a second recording attempt (before this service instance gets
-            // torn down) would silently skip startCapture() entirely,
-            // startForeground()'s notification and the whole permission/
-            // projection consent flow notwithstanding. Nulling these here,
-            // once teardown is actually complete, is what lets a later
-            // onStartCommand() correctly recognize "not capturing" and
-            // proceed. (RecordingViewModel.save()/discard() also now fully
-            // stopService()s once a session ends, which sidesteps this too
-            // by giving the next recording a truly fresh instance - but
-            // fixing the guard itself here is the actual root cause fix,
-            // not just a workaround for it.)
+            // Nulled so a later onStartCommand() sees "not capturing" (a
+            // cancelled Job is still non-null).
             captureJob = null
             writerJob = null
+            tickerJob = null
             outputFile = null
+            markerFile = null
             _state.value = _state.value.copy(isRecording = false, finishedFile = finished)
             stopForeground(STOP_FOREGROUND_REMOVE)
-            // Service stays alive (bound) so RecordingViewModel can still
-            // read the finished-file state; it unbinds (and this then stops)
-            // once the user Saves or Discards.
+            // Service stays alive (bound) so RecordingViewModel can read the
+            // finished-file state until the user Saves or Discards.
         }
     }
 
@@ -271,59 +350,73 @@ class RecordingService : Service() {
 
     override fun onDestroy() {
         stopRequested = true
-        audioRecord?.stop()
+        running = false
+        try { audioRecord?.stop() } catch (_: IllegalStateException) { }
         audioRecord?.release()
         mediaProjection?.stop()
         serviceScope.cancel()
         super.onDestroy()
     }
 
-    private fun buildNotification(recording: Boolean): Notification {
+    private fun pushNotification(elapsedMs: Long, level: StorageBudget.Level, force: Boolean) {
+        val text = NotificationText.compose(true, elapsedMs, level)
+        // Only re-post when the storage warning flips; the system ticks the
+        // clock itself via the chronometer.
+        val key = if (level == StorageBudget.Level.CRITICAL || level == StorageBudget.Level.STOP) "low" else "ok"
+        if (!force && lastNotifiedText == key) return
+        lastNotifiedText = key
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification(true, elapsedMs, level))
+    }
+
+    private fun buildNotification(recording: Boolean, elapsedMs: Long, level: StorageBudget.Level): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         if (manager.getNotificationChannel(CHANNEL_ID) == null) {
             manager.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "Mix recording", NotificationManager.IMPORTANCE_LOW)
             )
         }
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("DJayClone")
-            .setContentText(if (recording) "Recording your mix" else "Preparing to record")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val b = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(NotificationText.title(recording))
+            .setContentText(if (recording) {
+                if (level == StorageBudget.Level.CRITICAL || level == StorageBudget.Level.STOP) "Recording your mix · Low storage"
+                else "Recording your mix"
+            } else NotificationText.compose(false, elapsedMs, level))
+            .setSmallIcon(R.drawable.ic_rec)
+            .setContentIntent(open)
             .setOngoing(true)
-            .build()
+            .setOnlyAlertOnce(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+        if (recording) {
+            val stop = PendingIntent.getService(
+                this, 1, Intent(this, RecordingService::class.java).setAction(ACTION_STOP),
+                PendingIntent.FLAG_IMMUTABLE
+            )
+            b.setUsesChronometer(true)
+                .setShowWhen(true)
+                .setWhen(System.currentTimeMillis() - elapsedMs)
+                .addAction(0, "Stop", stop)
+        }
+        return b.build()
     }
 
     companion object {
         const val EXTRA_RESULT_CODE = "resultCode"
         const val EXTRA_RESULT_DATA = "resultData"
+        const val ACTION_STOP = "com.oblivion.djayclone.action.STOP_RECORDING"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1001
 
-        /** 44-byte canonical PCM WAV header. Called twice: once with
-         * totalPcmBytes=0 as a placeholder before any audio is written, once
-         * more (via RandomAccessFile.seek(0), implicit since this always
-         * writes from the file's current position which the caller resets)
-         * to patch in the real size once recording stops. */
-        fun writeWavHeader(raf: RandomAccessFile, totalPcmBytes: Long, sampleRate: Int, channelCount: Int) {
-            val byteRate = sampleRate * channelCount * 2 // 16-bit = 2 bytes/sample
-            val blockAlign = channelCount * 2
-            val header = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            header.put("RIFF".toByteArray())
-            header.putInt((36 + totalPcmBytes).toInt())
-            header.put("WAVE".toByteArray())
-            header.put("fmt ".toByteArray())
-            header.putInt(16) // Subchunk1Size (PCM)
-            header.putShort(1) // AudioFormat = PCM
-            header.putShort(channelCount.toShort())
-            header.putInt(sampleRate)
-            header.putInt(byteRate)
-            header.putShort(blockAlign.toShort())
-            header.putShort(16) // BitsPerSample
-            header.put("data".toByteArray())
-            header.putInt(totalPcmBytes.toInt())
-            raf.seek(0)
-            raf.write(header.array())
-            raf.seek(raf.length().coerceAtLeast(44))
-        }
+        /** True while a service instance exists (process-local). */
+        @Volatile var running: Boolean = false
+
+        /** noBackupFilesDir, not cacheDir/filesDir: the OS can't clear it under
+         * storage pressure, and a multi-GB take must never enter Auto Backup. */
+        fun recordingsDir(context: Context): File =
+            File(context.noBackupFilesDir, "recordings").also { it.mkdirs() }
     }
 }

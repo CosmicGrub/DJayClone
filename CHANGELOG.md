@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.18.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.18.0) - 2026-10-17
+
+**Quality-of-life wave 3: recording safety.** Recording had four ways to lose or corrupt a set; they are closed.
+
+- **Records only this app.** Capture is now restricted to the app's own audio (both decks), so a video in split-screen, a message sound or another app's music can no longer end up in your mix. The on-screen note that said "only the mix audio is recorded" is now literally true.
+- **A crash, kill or reboot no longer loses the take.** The WAV is written into app storage that is excluded from Auto Backup and cannot be cleared under pressure; its header is refreshed every ~2 s and the file synced every ~10 s, so it is playable at every moment and at most a few seconds are lost. On the next launch an unfinished take is offered back as "Recovered 1:42  SAVE  DISCARD". Verified on the tablet: force-killed mid-recording, relaunched, recovered. Takes under a second are cleaned up silently.
+- **Storage guard.** The idle row says "Space for about 25h 12m", the live row shows time left (amber under 15 min, red under 3), and recording stops cleanly with your audio saved before the disk is full. Save checks free space first instead of failing halfway.
+- **No dead timer.** The clock counts audio actually written. If capture stalls for 2 s the recording stops visibly ("Capture stopped unexpectedly - what was recorded is saved"). If the writer ever falls behind, the dropped span is written back as silence so the file keeps its real length, and a "glitch" note appears.
+- **Stray-tap protection.** After 30 s of recording, STOP asks "TAP AGAIN TO STOP" (3 s window); DISCARD of a take 10 s or longer asks for confirmation.
+- **Always visible.** A red REC strip with the running time shows over Library and Settings (tap to return to the mixer). The notification now reads "recording", ticks a live clock, has a Stop button, opens the app, and uses its own icon instead of a microphone.
+- Sample rate follows the device output (44.1 or 48 kHz) instead of a hard-coded 44.1; recordings stop cleanly at the 4 GB WAV limit.
+- Tests: 115 JVM tests (new: capture rate, storage maths, stop/discard guards, watchdog, notification text, WAV header build/parse/repair including unsigned sizes and the 4 GB clamp).
+
 ## [v0.17.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.17.0) - 2026-10-17
 
 **Quality-of-life wave 2: tempo control, BPM rescue, lock and output safety.**
