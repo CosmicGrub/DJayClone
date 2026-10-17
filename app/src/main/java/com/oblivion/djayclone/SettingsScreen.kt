@@ -219,6 +219,25 @@ fun SettingsScreen(
             onCheckedChange = { settingsRepo.setConfirmLoadOnPlayingDeck(it) }
         )
         SwitchRow(
+            label = "Pause when headphones or Bluetooth disconnect",
+            checked = settings.pauseOnOutputLoss,
+            onCheckedChange = { settingsRepo.setPauseOnOutputLoss(it) }
+        )
+        Text("Tempo fader range", color = Color.Gray, style = MaterialTheme.typography.labelSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            TempoFaderMath.ALLOWED_RANGES.forEach { pct ->
+                val selected = settings.tempoRangePercent == pct
+                TextButton(onClick = { settingsRepo.setTempoRangePercent(pct) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)) {
+                    Text("±$pct%", color = if (selected) AccentA else Color.Gray, style = MaterialTheme.typography.titleSmall)
+                }
+            }
+        }
+        SwitchRow(
+            label = "Invert tempo fader (right = slower)",
+            checked = settings.tempoFaderInverted,
+            onCheckedChange = { settingsRepo.setTempoFaderInverted(it) }
+        )
+        SwitchRow(
             label = "Keep screen on while playing or recording",
             checked = settings.keepScreenOn,
             onCheckedChange = { settingsRepo.setKeepScreenOn(it) }

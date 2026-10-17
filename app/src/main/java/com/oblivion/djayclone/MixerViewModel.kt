@@ -49,6 +49,17 @@ class MixerViewModel(application: Application) : AndroidViewModel(application) {
     fun setSyncLock(lock: String?) { _syncLock.value = lock }
     fun setSyncRatioMode(mode: SyncRatioMode) { _syncRatioMode.value = mode }
 
+    /** The DJ moved this deck's tempo by hand: if it was the follower of the
+     * current sync lock, drop the lock instead of fighting the hand. */
+    fun releaseSyncIfFollower(deckIsA: Boolean) {
+        val follower = when (_syncLock.value) {
+            SyncController.B_FOLLOWS_A -> false
+            SyncController.A_FOLLOWS_B -> true
+            else -> return
+        }
+        if (follower == deckIsA) _syncLock.value = null
+    }
+
     private var bound = false
 
     /** Starts the controllers. Idempotent: MainActivity.onCreate runs again

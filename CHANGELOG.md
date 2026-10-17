@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.17.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.17.0) - 2026-10-17
+
+**Quality-of-life wave 2: tempo control, BPM rescue, lock and output safety.**
+
+- **Tempo fader on every deck.** Drag for a tempo change (range selectable in Settings: 4, 6, 8, 10, 16, 25 or 50%), with a signed readout (`+3.25%`), a centre detent that returns bit-exact 1.0, double-tap to reset that deck, and an optional inverted direction. Engine updates are throttled while dragging. Moving a deck that is following a sync lock releases the lock instead of fighting your hand.
+- **BPM correction.** Tap the BPM readout to open a dialog: halve, double, x1.5 or x2/3 (the fixes for the 3:2 and octave errors the analyser can make), a typed BPM, and a TAP pad. Works when detection failed and the deck shows `-- BPM`, which re-enables loops, echo, beat jump and sync for that track. The correction is saved per track (`b=` field in the track record), shows a pencil mark, can be restored to the analysed value, and updates the library BPM.
+- **Tap tempo** tolerates a missed beat and fits tap times by least squares for a stable reading in a few taps.
+- **Deck lock now really locks.** The keyboard shortcuts (Space, arrow nudges), the KEY toggle and the mix RESET button used to bypass a locked deck; they now respect it. RESET leaves locked decks' tempo alone and says so.
+- **Pause when output disconnects.** Unplugging headphones or losing a Bluetooth/USB output pauses both decks instead of blasting the speaker (Settings toggle, on by default).
+- Tests: 104 JVM tests (new: input gate, tempo fader maths, BPM maths, tap tempo, BPM record codec).
+
 ## [v0.16.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.16.0) - 2026-10-16
 
 **Quality-of-life wave 1: performance controls, memory and safety nets** (djay Pro parity).

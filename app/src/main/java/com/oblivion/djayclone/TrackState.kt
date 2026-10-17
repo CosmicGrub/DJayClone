@@ -18,11 +18,13 @@ data class SavedTrackState(
     val loopOutMs: Long?,
     val loopBeats: Float?,
     val hotCues: List<Long?>,
+    /** A BPM the DJ typed/tapped/halved, overriding the analyser for this track. */
+    val userBpm: Float? = null,
 ) {
     /** True when there is nothing worth keeping - the store deletes such a
      * record rather than keeping an empty husk per track ever loaded. */
     val isEmpty: Boolean
-        get() = cuePointMs == null && loopInMs == null && loopOutMs == null && hotCues.all { it == null }
+        get() = cuePointMs == null && loopInMs == null && loopOutMs == null && userBpm == null && hotCues.all { it == null }
 }
 
 object TrackStateCodec {
@@ -49,6 +51,7 @@ object TrackStateCodec {
         if (s.hotCues.isNotEmpty()) {
             append(";h=").append(s.hotCues.joinToString(",") { it?.toString() ?: "" })
         }
+        s.userBpm?.let { append(";b=").append(it) }
     }
 
     /** Null for anything that is not a well-formed v1 record. Strict on
@@ -63,6 +66,7 @@ object TrackStateCodec {
         var loopOut: Long? = null
         var loopBeats: Float? = null
         var hot: List<Long?> = emptyList()
+        var userBpm: Float? = null
         for (p in parts.drop(1)) {
             val eq = p.indexOf('=')
             if (eq <= 0) return null
@@ -81,12 +85,13 @@ object TrackStateCodec {
                 "h" -> hot = v.split(',').map { slot ->
                     if (slot.isEmpty()) null else (slot.toLongOrNull() ?: return null)
                 }
+                "b" -> userBpm = v.toFloatOrNull() ?: return null
                 else -> { /* unknown field from a newer version: ignore it */ }
             }
         }
         val d = duration ?: return null
         if (d <= 0) return null
-        return SavedTrackState(d, cue, loopIn, loopOut, loopBeats, hot)
+        return SavedTrackState(d, cue, loopIn, loopOut, loopBeats, hot, userBpm)
     }
 
     /**
@@ -109,6 +114,7 @@ object TrackStateCodec {
             loopOutMs = if (loopOk) saved.loopOutMs else null,
             loopBeats = if (loopOk) saved.loopBeats else null,
             hotCues = saved.hotCues.map(::ok),
+            userBpm = saved.userBpm?.takeIf { BpmMath.isValid(it) },
         )
     }
 

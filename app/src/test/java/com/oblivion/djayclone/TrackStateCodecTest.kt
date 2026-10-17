@@ -137,6 +137,19 @@ class TrackStateCodecTest {
     }
 
     @Test
+    fun userBpmRoundTripsAndKeepsTheRecordAlive() {
+        val s = SavedTrackState(180_000, null, null, null, null, emptyList(), userBpm = 130.5f)
+        assertFalse(s.isEmpty)
+        assertEquals(s, TrackStateCodec.decode(TrackStateCodec.encode(s)))
+        assertTrue(TrackStateCodec.encode(s).endsWith(";b=130.5"))
+        assertNull(TrackStateCodec.decode("v1;d=1000;b=abc"))
+        assertNull(TrackStateCodec.validated(s.copy(userBpm = 999f), 180_000)!!.userBpm)
+        assertEquals(130.5f, TrackStateCodec.validated(s, 180_000)!!.userBpm!!, 0f)
+        // a record written before this field existed still decodes
+        assertNull(TrackStateCodec.decode("v1;d=1000;c=5")!!.userBpm)
+    }
+
+    @Test
     fun hotCuesAreReshapedToTheCurrentPadCount() {
         val saved = listOf<Long?>(1L, null, 3L, null, 5L)
         assertEquals(listOf<Long?>(1L, null, 3L, null), TrackStateCodec.hotCuesForCount(saved, 4))

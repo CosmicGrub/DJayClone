@@ -60,6 +60,12 @@ data class AppSettings(
     // Hold the screen awake while a deck is playing or a recording is
     // running - a DJ set that blanks the screen mid-mix is a disaster.
     val keepScreenOn: Boolean = true,
+    // Pause both decks when headphones/Bluetooth/USB output disconnects, so the
+    // cue feed never jumps to the speaker at full volume.
+    val pauseOnOutputLoss: Boolean = true,
+    // Tempo fader: full-scale range in percent (TempoFaderMath.ALLOWED_RANGES) and direction.
+    val tempoRangePercent: Int = 8,
+    val tempoFaderInverted: Boolean = false,
     // Ask before loading a track onto a deck that is currently playing
     // (see LoadGuard). A locked deck refuses loads regardless.
     val confirmLoadOnPlayingDeck: Boolean = true,
@@ -126,6 +132,9 @@ class SettingsRepository private constructor(app: Application) {
             crossfaderReversed = prefs.getBoolean(KEY_XFADE_REVERSED, d.crossfaderReversed),
             showTimeRemaining = prefs.getBoolean(KEY_TIME_REMAINING, d.showTimeRemaining),
             keepScreenOn = prefs.getBoolean(KEY_KEEP_SCREEN_ON, d.keepScreenOn),
+            pauseOnOutputLoss = prefs.getBoolean(KEY_PAUSE_ON_OUTPUT_LOSS, d.pauseOnOutputLoss),
+            tempoRangePercent = TempoFaderMath.coerceRange(prefs.getInt(KEY_TEMPO_RANGE, d.tempoRangePercent)),
+            tempoFaderInverted = prefs.getBoolean(KEY_TEMPO_INVERTED, d.tempoFaderInverted),
             confirmLoadOnPlayingDeck = prefs.getBoolean(KEY_CONFIRM_LOAD, d.confirmLoadOnPlayingDeck),
         )
     }
@@ -181,6 +190,22 @@ class SettingsRepository private constructor(app: Application) {
     fun setPersistFxAcrossLoad(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_PERSIST_FX, enabled).apply()
         _settings.value = _settings.value.copy(persistFxAcrossLoad = enabled)
+    }
+
+    fun setPauseOnOutputLoss(on: Boolean) {
+        prefs.edit().putBoolean(KEY_PAUSE_ON_OUTPUT_LOSS, on).apply()
+        _settings.value = _settings.value.copy(pauseOnOutputLoss = on)
+    }
+
+    fun setTempoRangePercent(pct: Int) {
+        val v = TempoFaderMath.coerceRange(pct)
+        prefs.edit().putInt(KEY_TEMPO_RANGE, v).apply()
+        _settings.value = _settings.value.copy(tempoRangePercent = v)
+    }
+
+    fun setTempoFaderInverted(on: Boolean) {
+        prefs.edit().putBoolean(KEY_TEMPO_INVERTED, on).apply()
+        _settings.value = _settings.value.copy(tempoFaderInverted = on)
     }
 
     fun setNudgeSteps(coarsePercent: Float, finePercent: Float) {
@@ -256,6 +281,9 @@ class SettingsRepository private constructor(app: Application) {
         private const val KEY_XFADE_REVERSED = "crossfader_reversed"
         private const val KEY_TIME_REMAINING = "show_time_remaining"
         private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
+        private const val KEY_PAUSE_ON_OUTPUT_LOSS = "pause_on_output_loss"
+        private const val KEY_TEMPO_RANGE = "tempo_range_percent"
+        private const val KEY_TEMPO_INVERTED = "tempo_fader_inverted"
         private const val KEY_CONFIRM_LOAD = "confirm_load_on_playing"
 
         @Volatile private var INSTANCE: SettingsRepository? = null

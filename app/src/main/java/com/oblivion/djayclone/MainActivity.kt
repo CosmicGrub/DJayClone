@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -292,6 +293,7 @@ class MainActivity : ComponentActivity() {
             androidx.compose.runtime.CompositionLocalProvider(
                 LocalDjLayoutClass provides djLayoutClass,
                 LocalDjPosture provides djPosture,
+                LocalManualTempo provides { d -> mixer.releaseSyncIfFollower(d === deckA) },
             ) {
             MaterialTheme(colorScheme = darkColorScheme(primary = AccentA)) {
                 Surface(modifier = Modifier.fillMaxSize().background(Color.Black)) {
@@ -534,6 +536,11 @@ fun MixerScreen(
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val coarseStep = settings.nudgeCoarsePercent
+                // A locked deck ignores the keyboard too (consume the key so
+                // Space cannot fall through to a focused button).
+                if (event.key in listOf(Key.Spacebar, Key.DirectionLeft, Key.DirectionRight) &&
+                    !InputGate.admit(stateA.isLocked, InputGate.Kind.NORMAL)
+                ) return@onPreviewKeyEvent true
                 when (event.key) {
                     Key.Spacebar -> { deckA.togglePlay(); true }
                     Key.DirectionLeft -> { deckA.nudgeSpeed(-coarseStep); true }
@@ -875,6 +882,7 @@ private fun DeckTouchPane(
         )
         DeckPadPanel(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
 
+        TempoControls(state = state, deck = deck, settings = settings, accent = accent)
         val coarsePct = settings.nudgeCoarsePercent
         val finePct = settings.nudgeFinePercent
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -1008,8 +1016,7 @@ private fun MixerArrangementCompact(
             TextButton(
                 onClick = {
                     onSyncLockChange(null)
-                    deckA.setPlaybackSpeed(1f)
-                    deckB.setPlaybackSpeed(1f)
+                    resetUnlockedTempos(deckA, deckB)
                 },
                 modifier = Modifier.weight(1f)
             ) {
@@ -1180,8 +1187,7 @@ private fun MixerArrangementMedium(
             TextButton(
                 onClick = {
                     onSyncLockChange(null)
-                    deckA.setPlaybackSpeed(1f)
-                    deckB.setPlaybackSpeed(1f)
+                    resetUnlockedTempos(deckA, deckB)
                 },
                 modifier = Modifier.weight(1f)
             ) {
@@ -1427,8 +1433,7 @@ private fun CenterMixColumn(
         TextButton(
             onClick = {
                 onSyncLockChange(null)
-                deckA.setPlaybackSpeed(1f)
-                deckB.setPlaybackSpeed(1f)
+                resetUnlockedTempos(deckA, deckB)
             },
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -1665,6 +1670,7 @@ private fun DeckColumnCompact(
         // without clipping off the edge of the screen.
         // Stage 8: step sizes are user-configurable (Settings > Playback
         // defaults); default to the original +/-1%/+/-0.1% behavior.
+        TempoControls(state = state, deck = deck, settings = settings, accent = accent)
         val coarsePct = settings.nudgeCoarsePercent
         val finePct = settings.nudgeFinePercent
         Row(
@@ -1760,6 +1766,8 @@ private fun DeckColumnCompact(
  */
 @Composable
 private fun DeckBpmKeyRow(state: DeckUiState, deck: DeckViewModel, accent: Color, style: TextStyle, modifier: Modifier = Modifier) {
+    var showBpmDialog by remember { mutableStateOf(false) }
+    if (showBpmDialog) BpmDialog(state = state, deck = deck, accent = accent, onDismiss = { showBpmDialog = false })
     Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             text = when {
@@ -1772,26 +1780,31 @@ private fun DeckBpmKeyRow(state: DeckUiState, deck: DeckViewModel, accent: Color
                     // template, and keeping it out avoids any risk of a
                     // future value containing a literal '%' being misread
                     // as a format specifier.
-                    state.key?.let { "$base  ·  $it" } ?: base
+                    val withKey = state.key?.let { "$base  ·  $it" } ?: base
+                    if (state.userBpm != null) "$withKey  ✎" else withKey
                 }
                 else -> "-- BPM"
             },
             color = accent,
             style = style,
-            modifier = Modifier.weight(1f)
+            // Tap the BPM to correct it (half/double, typed, tap tempo). Also
+            // the way out when detection failed and shows "-- BPM".
+            modifier = Modifier
+                .weight(1f)
+                .clickable(enabled = !state.isAnalyzing && !state.isLocked, onClickLabel = "Edit BPM", role = Role.Button) { showBpmDialog = true }
         )
-        KeyLockToggle(enabled = state.keyLockEnabled, accent = accent, onToggle = { deck.setKeyLock(!state.keyLockEnabled) })
+        KeyLockToggle(enabled = state.keyLockEnabled, accent = accent, locked = state.isLocked, onToggle = { deck.setKeyLock(!state.keyLockEnabled) })
     }
 }
 
 @Composable
-private fun KeyLockToggle(enabled: Boolean, accent: Color, onToggle: () -> Unit) {
+private fun KeyLockToggle(enabled: Boolean, accent: Color, locked: Boolean, onToggle: () -> Unit) {
     Text(
         text = if (enabled) "🔒 KEY" else "KEY",
-        color = if (enabled) accent else Color.Gray,
+        color = if (locked) Color.DarkGray else if (enabled) accent else Color.Gray,
         maxLines = 1,
         style = MaterialTheme.typography.labelSmall,
-        modifier = Modifier.clickable(onClick = onToggle).padding(horizontal = 6.dp)
+        modifier = Modifier.clickable(enabled = !locked, onClick = onToggle).padding(horizontal = 6.dp)
     )
 }
 
@@ -1907,6 +1920,7 @@ private fun DeckColumnExpanded(
         // One row of four, not two rows of two: this column has real
         // horizontal width to spend on a >=600dp screen, unlike Compact's
         // half-phone-width origin for the two-row layout.
+        TempoControls(state = state, deck = deck, settings = settings, accent = accent)
         val coarsePct = settings.nudgeCoarsePercent
         val finePct = settings.nudgeFinePercent
         Row(
@@ -2146,4 +2160,16 @@ private fun format(ms: Long): String {
     val m = totalSec / 60
     val s = totalSec % 60
     return "%d:%02d".format(m, s)
+}
+
+/** RESET: back to original tempo on every deck that is not locked. */
+private fun resetUnlockedTempos(deckA: DeckViewModel, deckB: DeckViewModel) {
+    val context = deckA.getApplication<android.app.Application>()
+    val skipped = mutableListOf<String>()
+    val targets = InputGate.decksToReset(deckA.state.value.isLocked, deckB.state.value.isLocked)
+    if ('A' in targets) deckA.setPlaybackSpeed(1f) else skipped.add("A")
+    if ('B' in targets) deckB.setPlaybackSpeed(1f) else skipped.add("B")
+    if (skipped.isNotEmpty()) {
+        android.widget.Toast.makeText(context, "Deck ${skipped.joinToString(" and ")} is locked - tempo kept", android.widget.Toast.LENGTH_SHORT).show()
+    }
 }

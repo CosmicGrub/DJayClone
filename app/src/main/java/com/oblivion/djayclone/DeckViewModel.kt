@@ -59,7 +59,11 @@ data class DeckUiState(
     val error: String? = null,
     val waveform: FloatArray? = null,
     val spectral: SpectralWaveform? = null,   // null until analysis completes; see AudioAnalyzer
+    /** The effective base BPM everything reads: [userBpm] if set, else [analyzedBpm]. */
     val bpm: Float? = null,
+    val analyzedBpm: Float? = null,
+    /** A BPM the DJ corrected by hand (saved per track). */
+    val userBpm: Float? = null,
     val key: String? = null,      // Camelot notation ("8B" etc), from AudioAnalyzer/KeyDetector
     // Key Lock ("Master Tempo" in most DJ software): on by default, matching
     // that convention. NOT reset on loadTrack (see the reset block below,
@@ -211,6 +215,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         // nearest sync frame (tens of ms wide), so even a perfectly-timed
         // trigger would land in the wrong place.
         player.setSeekParameters(SeekParameters.EXACT)
+        player.setHandleAudioBecomingNoisy(settingsRepository.settings.value.pauseOnOutputLoss)
 
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -316,7 +321,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         @OptIn(FlowPreview::class)
         viewModelScope.launch {
             _state
-                .map { Persisted(it.uri, it.cuePointMs, it.loopInMs, it.loopOutMs, it.loopBeats, it.hotCues) }
+                .map { Persisted(it.uri, it.cuePointMs, it.loopInMs, it.loopOutMs, it.loopBeats, it.hotCues, it.userBpm) }
                 .distinctUntilChanged()
                 .debounce(400)
                 .collect { persistTrackStateNow() }
@@ -340,6 +345,8 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private companion object { val LOOP_CHIPS = listOf(0.125f, 0.25f, 0.5f, 1f, 2f, 4f, 8f, 16f) }
+
     private data class Persisted(
         val uri: Uri?,
         val cue: Long?,
@@ -347,6 +354,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         val loopOut: Long?,
         val loopBeats: Float?,
         val hotCues: List<Long?>,
+        val userBpm: Float?,
     )
 
     /** Applies this track's saved cues/loop once the player knows its real
@@ -366,8 +374,12 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         val count = settingsRepository.settings.value.hotCueCount
         val live = TrackStateCodec.Live(st.cuePointMs, st.loopInMs, st.loopOutMs, st.loopBeats, st.hotCues)
         val restored = TrackStateCodec.restore(live, saved, count)
+        val restoredBpm = if (st.userBpm == null) saved?.userBpm else null
+        if (restoredBpm != null) {
+            _state.value = _state.value.copy(userBpm = restoredBpm, bpm = restoredBpm)
+        }
         if (restored != live) {
-            _state.value = st.copy(
+            _state.value = _state.value.copy(
                 cuePointMs = restored.cuePointMs,
                 hotCues = restored.hotCues,
                 loopInMs = restored.loopInMs,
@@ -387,7 +399,26 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
      * over from the previous record (see TrackStateCodec.mergeHotCues). */
     private fun currentPersisted(): Persisted {
         val st = _state.value
-        return Persisted(st.uri, st.cuePointMs, st.loopInMs, st.loopOutMs, st.loopBeats, st.hotCues)
+        return Persisted(st.uri, st.cuePointMs, st.loopInMs, st.loopOutMs, st.loopBeats, st.hotCues, st.userBpm)
+    }
+
+    /** Sets (or, with null, clears) a hand-corrected BPM for the loaded track.
+     * The effective [DeckUiState.bpm] follows at once; loops keep their
+     * milliseconds, and a beat-loop label is re-derived from the new tempo. */
+    fun setUserBpm(bpm: Float?) {
+        val st = _state.value
+        if (st.uri == null) return
+        val v = bpm?.takeIf { BpmMath.isValid(it) }
+        if (bpm != null && v == null) return
+        val effective = v ?: st.analyzedBpm
+        var next = st.copy(userBpm = v, bpm = effective)
+        if (st.loopInMs != null && st.loopOutMs != null && effective != null) {
+            next = next.copy(loopBeats = BpmMath.relabelLoopBeats(st.loopOutMs - st.loopInMs, effective, LOOP_CHIPS))
+        }
+        _state.value = next
+        if (effective != null) {
+            TrackCacheRepository.get(getApplication()).setCachedBpm(TrackId.from(st.uri), effective)
+        }
     }
 
     private fun persistTrackStateNow() {
@@ -411,6 +442,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
                 loopOutMs = if (loopOk) st.loopOutMs else null,
                 loopBeats = if (loopOk) st.loopBeats else null,
                 hotCues = TrackStateCodec.mergeHotCues(st.hotCues, previous?.hotCues),
+                userBpm = st.userBpm,
             )
         )
     }
@@ -419,6 +451,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         filterProcessor.setRangeConfig(settings.filterRange)
         echoProcessor.setRangeConfig(settings.echoRange)
         resizeHotCues(settings.hotCueCount)
+        player.setHandleAudioBecomingNoisy(settings.pauseOnOutputLoss)
     }
 
     /** Growing: existing entries keep their indices, new trailing slots are
@@ -464,6 +497,8 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             waveform = null,
             spectral = null,
             bpm = null,
+            analyzedBpm = null,
+            userBpm = null,
             key = null,
             isAnalyzing = true,
             playbackSpeed = 1f,
@@ -521,7 +556,8 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             _state.value = _state.value.copy(
                 waveform = result?.waveform,
                 spectral = result?.spectral,
-                bpm = result?.bpm,
+                analyzedBpm = result?.bpm,
+                bpm = _state.value.userBpm ?: result?.bpm,
                 key = result?.key,
                 isAnalyzing = false,
             )
@@ -531,9 +567,8 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             // IO spike over hundreds of files); the cache fills in
             // organically as tracks get played instead. Key detection rides
             // the same cache-once policy for the same reason.
-            if (result?.bpm != null) {
-                TrackCacheRepository.get(getApplication()).setCachedBpm(TrackId.from(uri), result.bpm)
-            }
+            // The effective value, so a DJ's correction is what the library shows.
+            _state.value.bpm?.let { TrackCacheRepository.get(getApplication()).setCachedBpm(TrackId.from(uri), it) }
             if (result?.key != null) {
                 TrackCacheRepository.get(getApplication()).setCachedKey(TrackId.from(uri), result.key)
             }
