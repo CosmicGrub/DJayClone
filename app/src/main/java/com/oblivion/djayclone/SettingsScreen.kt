@@ -150,8 +150,37 @@ fun SettingsScreen(
             label = "Default crossfader position",
             value = settings.defaultCrossfaderPosition,
             valueRange = 0f..1f,
-            format = { "A ${"%.0f".format((1 - it) * 100)}% / B ${"%.0f".format(it * 100)}%" },
+            format = {
+                if (settings.crossfaderReversed) "B ${"%.0f".format((1 - it) * 100)}% / A ${"%.0f".format(it * 100)}%"
+                else "A ${"%.0f".format((1 - it) * 100)}% / B ${"%.0f".format(it * 100)}%"
+            },
             onValueChangeFinished = { settingsRepo.setDefaultCrossfaderPosition(it) }
+        )
+        Text("Crossfader curve", color = Color.Gray, style = MaterialTheme.typography.labelSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CrossfaderCurve.values().forEach { curve ->
+                val selected = settings.crossfaderCurve == curve
+                TextButton(onClick = { settingsRepo.setCrossfaderCurve(curve) }) {
+                    Text(
+                        curve.label,
+                        color = if (selected) AccentA else Color.Gray,
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                }
+            }
+        }
+        Text(
+            when (settings.crossfaderCurve) {
+                CrossfaderCurve.SMOOTH -> "Equal-power blend: steady loudness through the middle."
+                CrossfaderCurve.LINEAR -> "Straight fade: dips slightly in the middle."
+                CrossfaderCurve.SHARP -> "Club cut-in: both decks at full volume past the centre, fades only near each end. Louder in the middle."
+            },
+            color = Color.DarkGray, style = MaterialTheme.typography.labelSmall
+        )
+        SwitchRow(
+            label = "Reverse crossfader (A on the right)",
+            checked = settings.crossfaderReversed,
+            onCheckedChange = { settingsRepo.setCrossfaderReversed(it) }
         )
         SwitchRow(
             label = "Keep loops/cues across track load",
@@ -183,6 +212,42 @@ fun SettingsScreen(
             onValueChangeFinished = { settingsRepo.setNudgeSteps(settings.nudgeCoarsePercent, it / 100f) }
         )
 
+        SettingsSection("SAFETY · DISPLAY")
+        SwitchRow(
+            label = "Confirm before loading onto a playing deck",
+            checked = settings.confirmLoadOnPlayingDeck,
+            onCheckedChange = { settingsRepo.setConfirmLoadOnPlayingDeck(it) }
+        )
+        SwitchRow(
+            label = "Keep screen on while playing or recording",
+            checked = settings.keepScreenOn,
+            onCheckedChange = { settingsRepo.setKeepScreenOn(it) }
+        )
+        val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+        val trackStateRepo = remember { TrackStateRepository.get(appContext as android.app.Application) }
+        var savedCount by remember { mutableStateOf(trackStateRepo.count()) }
+        var confirmForget by remember { mutableStateOf(false) }
+        TextButton(onClick = { confirmForget = true }, enabled = savedCount > 0, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                if (savedCount > 0) "FORGET SAVED CUES & LOOPS ($savedCount tracks)" else "NO SAVED CUES OR LOOPS",
+                color = if (savedCount > 0) Color(0xFFFF5A7A) else Color.DarkGray,
+                style = MaterialTheme.typography.labelMedium
+            )
+        }
+        if (confirmForget) {
+            AlertDialog(
+                onDismissRequest = { confirmForget = false },
+                title = { Text("Forget all saved cues and loops?") },
+                text = { Text("Hot cues, cue points and loops remembered for $savedCount tracks will be permanently removed. Tracks, BPM and key data are not affected.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        trackStateRepo.clearAll(); savedCount = 0; confirmForget = false
+                    }) { Text("Forget", color = Color(0xFFFF5A7A)) }
+                },
+                dismissButton = { TextButton(onClick = { confirmForget = false }) { Text("Cancel") } }
+            )
+        }
+
         SettingsSection("TEMPO SYNC")
         LabeledSlider(
             label = "Half/double-time match tolerance",
@@ -199,7 +264,7 @@ fun SettingsScreen(
         }
 
         Text(
-            "Settings persist across app updates but are cleared if you uninstall the app or clear its storage.",
+            "Settings persist across app updates and may be restored from your Google backup. Saved cues and loops stay on this device only.",
             color = Color.DarkGray,
             style = MaterialTheme.typography.labelSmall
         )

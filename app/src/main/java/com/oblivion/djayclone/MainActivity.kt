@@ -52,6 +52,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlin.math.cos
@@ -95,6 +102,11 @@ class MainActivity : ComponentActivity() {
     // `recording` above) - not per-deck.
     private val libraryViewModel: LibraryViewModel by lazy { viewModelProvider[LibraryViewModel::class.java] }
 
+    // Mixer-level state (crossfader, sync lock) and its controllers - Activity
+    // scoped so it survives Settings/Library navigation and recreation; see
+    // MixerViewModel's doc for the bug this fixes.
+    private val mixer: MixerViewModel by lazy { viewModelProvider[MixerViewModel::class.java] }
+
     // Stage 9: not a singleton - cheap to construct, holds no state of its
     // own (see TrackLibraryRepository's class doc). Used here only for the
     // fire-and-forget registerManualImport() call inside the per-deck SAF
@@ -103,6 +115,25 @@ class MainActivity : ComponentActivity() {
     private val libraryRepo by lazy { TrackLibraryRepository(application) }
 
     private var audioFocusRequest: android.media.AudioFocusRequest? = null
+
+    // Load protection (see LoadGuard): every route that puts a track on a deck
+    // goes through requestLoad(), which refuses a locked deck and can ask
+    // before replacing one that is playing.
+    private data class PendingLoad(val deck: Deck, val uri: Uri, val title: String?)
+    private var pendingLoad by mutableStateOf<PendingLoad?>(null)
+
+    private fun deckFor(deck: Deck) = if (deck == Deck.A) deckA else deckB
+
+    private fun requestLoad(deck: Deck, uri: Uri, title: String?) {
+        val vm = deckFor(deck)
+        val st = vm.state.value
+        when (LoadGuard.decide(st.isLocked, st.isPlaying, settingsRepo.settings.value.confirmLoadOnPlayingDeck)) {
+            LoadGuard.Decision.LOAD -> vm.loadTrack(uri, title)
+            LoadGuard.Decision.REFUSE_LOCKED ->
+                android.widget.Toast.makeText(this, "Deck ${deck.name} is locked", android.widget.Toast.LENGTH_SHORT).show()
+            LoadGuard.Decision.CONFIRM_PLAYING -> pendingLoad = PendingLoad(deck, uri, title)
+        }
+    }
 
     // Stage 6 recording consent chain: RECORD_AUDIO -> (API 33+) POST_NOTIFICATIONS
     // -> MediaProjection system consent dialog. Each step only runs if the
@@ -223,7 +254,28 @@ class MainActivity : ComponentActivity() {
         val pickForA = registerImportLauncher(deckA)
         val pickForB = registerImportLauncher(deckB)
 
-        handleViewIntent(intent)
+        mixer.bind(deckA, deckB)
+        // Keep the screen awake while either deck plays or a recording runs
+        // (Settings > Keep screen on), only while the Activity is visible.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                combine(
+                    deckA.state.map { it.isPlaying }.distinctUntilChanged(),
+                    deckB.state.map { it.isPlaying }.distinctUntilChanged(),
+                    recording.state.map { it.isRecording }.distinctUntilChanged(),
+                    settingsRepo.settings.map { it.keepScreenOn }.distinctUntilChanged(),
+                ) { a, b, r, keep -> keep && (a || b || r) }
+                    .distinctUntilChanged()
+                    .collect { on ->
+                        if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+            }
+        }
+        // Only on a genuine launch: a recreation (fold, rotate, DeX resize) hands
+        // the SAME VIEW intent back, which used to re-run the load guard and pop
+        // 'Load onto Deck A?' (or a locked-deck toast) mid-set.
+        if (savedInstanceState == null) handleViewIntent(intent)
         requestAudioFocus()
 
         setContent {
@@ -253,6 +305,22 @@ class MainActivity : ComponentActivity() {
                     // regardless of which screen is shown, since they live
                     // in Activity-scoped ViewModels independent of it.
                     var screen by remember { mutableStateOf(AppScreen.MIXER) }
+                    pendingLoad?.let { p ->
+                        AlertDialog(
+                            onDismissRequest = { pendingLoad = null },
+                            title = { Text("Load onto Deck ${p.deck.name}?") },
+                            text = {
+                                Text("Deck ${p.deck.name} is playing. Loading \"${p.title ?: "this track"}\" will replace what is on it.")
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    deckFor(p.deck).loadTrack(p.uri, p.title)
+                                    pendingLoad = null
+                                }) { Text("Load", color = Color(0xFFFF5A7A)) }
+                            },
+                            dismissButton = { TextButton(onClick = { pendingLoad = null }) { Text("Cancel") } },
+                        )
+                    }
                     when (screen) {
                         AppScreen.SETTINGS -> {
                             BackHandler { screen = AppScreen.MIXER }
@@ -269,9 +337,7 @@ class MainActivity : ComponentActivity() {
                             BackHandler { screen = AppScreen.MIXER }
                             LibraryScreen(
                                 library = libraryViewModel,
-                                onLoadTrack = { track, deck ->
-                                    (if (deck == Deck.A) deckA else deckB).loadTrack(track.uri, track.title)
-                                },
+                                onLoadTrack = { track, deck -> requestLoad(deck, track.uri, track.title) },
                                 onAddFromFiles = { addToLibraryLauncher.launch(arrayOf("audio/*")) },
                                 onRequestPermission = { ensureLibraryPermission() },
                                 onBack = { screen = AppScreen.MIXER },
@@ -281,6 +347,7 @@ class MainActivity : ComponentActivity() {
                             MixerScreen(
                                 deckA = deckA,
                                 deckB = deckB,
+                                mixer = mixer,
                                 recording = recording,
                                 settingsRepo = settingsRepo,
                                 onImportA = { pickForA.launch(arrayOf("audio/*")) },
@@ -295,9 +362,7 @@ class MainActivity : ComponentActivity() {
                                 // a different place, so it drives the same
                                 // deck-loading and manual-import side effects.
                                 libraryViewModel = libraryViewModel,
-                                onLoadTrack = { track, deck ->
-                                    (if (deck == Deck.A) deckA else deckB).loadTrack(track.uri, track.title)
-                                },
+                                onLoadTrack = { track, deck -> requestLoad(deck, track.uri, track.title) },
                                 onAddFromFiles = { addToLibraryLauncher.launch(arrayOf("audio/*")) },
                                 onRequestLibraryPermission = { ensureLibraryPermission() },
                             )
@@ -363,8 +428,8 @@ class MainActivity : ComponentActivity() {
         val uri = intent?.takeIf { it.action == android.content.Intent.ACTION_VIEW }?.data ?: return
         // "deck" extra lets adb/test tooling target Deck B; real "Open with"
         // launches from other apps always land on Deck A.
-        val target = if (intent.getStringExtra("deck") == "B") deckB else deckA
-        target.loadTrack(uri, queryDisplayName(uri))
+        val target = if (intent.getStringExtra("deck") == "B") Deck.B else Deck.A
+        requestLoad(target, uri, queryDisplayName(uri))
     }
 
     private fun registerImportLauncher(deck: DeckViewModel) =
@@ -375,7 +440,7 @@ class MainActivity : ComponentActivity() {
                 )
                 // Unchanged, still instant - a live-mixing DJ needs this
                 // one-tap load to stay exactly as fast as it's always been.
-                deck.loadTrack(uri, queryDisplayName(uri))
+                requestLoad(if (deck === deckA) Deck.A else Deck.B, uri, queryDisplayName(uri))
                 // Stage 9: every SAF import also silently grows the library
                 // going forward, whether or not the DJ ever opens it -
                 // fire-and-forget, no refresh needed here since the Library
@@ -398,6 +463,7 @@ class MainActivity : ComponentActivity() {
 fun MixerScreen(
     deckA: DeckViewModel,
     deckB: DeckViewModel,
+    mixer: MixerViewModel,
     recording: RecordingViewModel,
     settingsRepo: SettingsRepository,
     onImportA: () -> Unit,
@@ -421,66 +487,17 @@ fun MixerScreen(
     val recState by recording.state.collectAsState()
     val settings by settingsRepo.settings.collectAsState()
 
-    // Seeded once from the persisted default at first composition, not
-    // retroactively re-applied if the setting changes later mid-session -
-    // matches how a physical mixer's crossfader doesn't jump on its own.
-    var crossfader by remember { mutableStateOf(settings.defaultCrossfaderPosition) } // 0 = full A, 1 = full B
-
-    // Equal-power crossfade combined with each deck's own channel fader and
-    // its Auto Gain trim (see DeckUiState.autoGainTrim's own doc for why
-    // that's a separate multiplier from gain, not folded into it).
-    LaunchedEffect(crossfader, stateA.gain, stateA.autoGainTrim, stateB.gain, stateB.autoGainTrim) {
-        val x = crossfader.toDouble()
-        val factorA = cos(x * HALF_PI).toFloat()
-        val factorB = sin(x * HALF_PI).toFloat()
-        deckA.setEffectiveVolume(stateA.gain * stateA.autoGainTrim * factorA)
-        deckB.setEffectiveVolume(stateB.gain * stateB.autoGainTrim * factorB)
-    }
-
-    // Continuous sync lock: once engaged, the follower deck keeps tracking
-    // the leader's *effective* BPM (detected tempo x its own pitch nudges),
-    // not just a one-time snap - so fine-nudging the leader afterwards keeps
-    // both decks locked instead of drifting back out of sync.
-    var syncLock by remember { mutableStateOf<String?>(null) } // "B_FOLLOWS_A" | "A_FOLLOWS_B" | null
-
-    // Tempo-Sync v1: AUTO detects a half/double-time relationship instead
-    // of always forcing 1:1 - see TempoSyncMath's doc for the real
-    // motivation (a 140/70 BPM pair used to fight the old unity-only lock).
-    // The other three modes force that ratio regardless of measurement,
-    // for a deliberate half-time drop that isn't really a 2:1 relationship.
-    var syncRatioMode by remember { mutableStateOf(SyncRatioMode.AUTO) }
-
-    LaunchedEffect(syncLock, syncRatioMode, stateA.bpm, stateB.bpm, stateA.playbackSpeed, stateB.playbackSpeed) {
-        val bpmA = stateA.bpm
-        val bpmB = stateB.bpm
-        if (bpmA == null || bpmB == null) return@LaunchedEffect
-
-        fun resolveRatio(leaderEffectiveBpm: Float, followerEffectiveBpm: Float): TempoSyncMath.SyncRatio =
-            when (syncRatioMode) {
-                SyncRatioMode.AUTO -> TempoSyncMath.detectRatio(
-                    leaderEffectiveBpm, followerEffectiveBpm,
-                    tolerance = settings.tempoSyncConfig.ratioToleranceFraction,
-                )?.ratio ?: TempoSyncMath.SyncRatio.UNITY
-                SyncRatioMode.UNITY -> TempoSyncMath.SyncRatio.UNITY
-                SyncRatioMode.DOUBLE_TIME -> TempoSyncMath.SyncRatio.DOUBLE_TIME
-                SyncRatioMode.HALF_TIME -> TempoSyncMath.SyncRatio.HALF_TIME
-            }
-
-        when (syncLock) {
-            "B_FOLLOWS_A" -> {
-                val leaderEffective = bpmA * stateA.playbackSpeed
-                val ratio = resolveRatio(leaderEffective, bpmB * stateB.playbackSpeed)
-                val target = TempoSyncMath.targetPlaybackSpeed(leaderEffective, bpmB, ratio)
-                if (kotlin.math.abs(target - stateB.playbackSpeed) > 0.0005f) deckB.setPlaybackSpeed(target)
-            }
-            "A_FOLLOWS_B" -> {
-                val leaderEffective = bpmB * stateB.playbackSpeed
-                val ratio = resolveRatio(leaderEffective, bpmA * stateA.playbackSpeed)
-                val target = TempoSyncMath.targetPlaybackSpeed(leaderEffective, bpmA, ratio)
-                if (kotlin.math.abs(target - stateA.playbackSpeed) > 0.0005f) deckA.setPlaybackSpeed(target)
-            }
-        }
-    }
+    // Crossfader position, sync lock and sync ratio mode live in MixerViewModel
+    // (Activity-scoped) rather than in remember{} here: this composable leaves
+    // the composition whenever Settings or the Library opens and is rebuilt on
+    // every configuration change, and remember{} state did not survive either
+    // - opening Settings mid-set silently re-centred the crossfader and
+    // dropped the sync lock. The controllers that act on them (crossfade
+    // volume, continuous tempo sync) run in the ViewModel too, so a locked
+    // follower keeps tracking its leader while another screen is up.
+    val crossfader by mixer.crossfader.collectAsState()
+    val syncLock by mixer.syncLock.collectAsState()
+    val syncRatioMode by mixer.syncRatioMode.collectAsState()
 
     // Stage 10b: "DeX keyboard shortcuts (space, arrow-key nudge)" per the
     // Stage 10 pitch - deliberately Deck A only, a decision made explicitly
@@ -534,11 +551,11 @@ fun MixerScreen(
             recState = recState,
             recording = recording,
             crossfader = crossfader,
-            onCrossfaderChange = { crossfader = it },
+            onCrossfaderChange = { mixer.setCrossfader(it) },
             syncLock = syncLock,
-            onSyncLockChange = { syncLock = it },
+            onSyncLockChange = { mixer.setSyncLock(it) },
             syncRatioMode = syncRatioMode,
-            onSyncRatioModeChange = { syncRatioMode = it },
+            onSyncRatioModeChange = { mixer.setSyncRatioMode(it) },
             onImportA = onImportA,
             onImportB = onImportB,
             onStartRecording = onStartRecording,
@@ -795,6 +812,7 @@ private fun DeckGlancePane(
             )
         }
 
+        DeckErrorBanner(state = state, deck = deck)
         val progress = if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
         WaveformStrip(
             trackName = state.trackName,
@@ -808,6 +826,8 @@ private fun DeckGlancePane(
             loopInMs = state.loopInMs,
             loopOutMs = state.loopOutMs,
             loopActive = state.loopActive,
+            onSeekFraction = { deck.seekToFraction(it) },
+            locked = state.isLocked,
             modifier = Modifier.fillMaxWidth().weight(1f),
         )
 
@@ -843,11 +863,7 @@ private fun DeckTouchPane(
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Text(
-                "${format(state.positionMs)} / ${format(state.durationMs)}",
-                color = Color.Gray,
-                style = MaterialTheme.typography.labelSmall
-            )
+            DeckTimeReadout(state = state)
         }
 
         CueLoopRow(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
@@ -857,7 +873,7 @@ private fun DeckTouchPane(
             modifier = Modifier.fillMaxWidth(),
             locked = state.isLocked,
         )
-        HotCueGrid(hotCues = state.hotCues, deck = deck, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
+        DeckPadPanel(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
 
         val coarsePct = settings.nudgeCoarsePercent
         val finePct = settings.nudgeFinePercent
@@ -1034,9 +1050,7 @@ private fun MixerArrangementCompact(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("A", color = AccentA, style = MaterialTheme.typography.labelLarge)
-                Text("CROSSFADER", color = Color.Gray, style = MaterialTheme.typography.labelSmall)
-                Text("B", color = AccentB, style = MaterialTheme.typography.labelLarge)
+                CrossfaderLabels()
             }
             Slider(
                 value = crossfader,
@@ -1202,9 +1216,7 @@ private fun MixerArrangementMedium(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("A", color = AccentA, style = MaterialTheme.typography.labelLarge)
-                Text("CROSSFADER", color = Color.Gray, style = MaterialTheme.typography.labelSmall)
-                Text("B", color = AccentB, style = MaterialTheme.typography.labelLarge)
+                CrossfaderLabels()
             }
             Slider(
                 value = crossfader,
@@ -1449,9 +1461,7 @@ private fun CenterMixColumn(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("A", color = AccentA, style = MaterialTheme.typography.labelLarge)
-            Text("CROSSFADER", color = Color.Gray, style = MaterialTheme.typography.labelSmall)
-            Text("B", color = AccentB, style = MaterialTheme.typography.labelLarge)
+            CrossfaderLabels()
         }
         Slider(
             value = crossfader,
@@ -1587,6 +1597,7 @@ private fun DeckColumnCompact(
             Text(state.trackName, color = if (state.isLocked) Color.DarkGray else Color.White, maxLines = 1)
         }
 
+        DeckErrorBanner(state = state, deck = deck)
         val progress = if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
         WaveformStrip(
             trackName = state.trackName,
@@ -1600,6 +1611,8 @@ private fun DeckColumnCompact(
             loopInMs = state.loopInMs,
             loopOutMs = state.loopOutMs,
             loopActive = state.loopActive,
+            onSeekFraction = { deck.seekToFraction(it) },
+            locked = state.isLocked,
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -1636,7 +1649,7 @@ private fun DeckColumnCompact(
                     modifier = Modifier.fillMaxWidth(),
                     locked = state.isLocked,
                 )
-                HotCueGrid(hotCues = state.hotCues, deck = deck, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
+                DeckPadPanel(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
                 // Stage 7: echo lives here (toggle-then-glance, same
                 // interaction shape as the beat-loop chips above it) rather
                 // than always-visible like FILTER below - it's armed once
@@ -1693,11 +1706,7 @@ private fun DeckColumnCompact(
                     modifier = Modifier.size(24.dp)
                 )
             }
-            Text(
-                "${format(state.positionMs)} / ${format(state.durationMs)}",
-                color = Color.Gray,
-                style = MaterialTheme.typography.labelSmall
-            )
+            DeckTimeReadout(state = state)
         }
 
         Text("GAIN", color = Color.Gray, style = MaterialTheme.typography.labelSmall)
@@ -1834,7 +1843,13 @@ private fun DeckColumnExpanded(
     modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = modifier,
+        // verticalScroll as a SAFETY NET, not a design change: this column is
+        // budgeted to fit with no scrolling, but a short window (cover-screen
+        // landscape, a split-screen/DeX window, 16 hot-cue pads, a larger
+        // system font) used to silently clip the bottom controls - the EQ -
+        // off-screen with no way to reach them. Where everything fits, this
+        // is a no-op; where it does not, the column now scrolls instead.
+        modifier = modifier.verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
         // Tighter than Compact's 6dp/Stage-10a's original 4dp - real budget
         // math after adding EQ below: see this function's doc comment for
@@ -1853,6 +1868,7 @@ private fun DeckColumnExpanded(
             Text(state.trackName, color = if (state.isLocked) Color.DarkGray else Color.White, maxLines = 1)
         }
 
+        DeckErrorBanner(state = state, deck = deck)
         val progress = if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
         WaveformStrip(
             trackName = state.trackName,
@@ -1866,6 +1882,8 @@ private fun DeckColumnExpanded(
             loopInMs = state.loopInMs,
             loopOutMs = state.loopOutMs,
             loopActive = state.loopActive,
+            onSeekFraction = { deck.seekToFraction(it) },
+            locked = state.isLocked,
             modifier = Modifier.fillMaxWidth(),
             heightDp = 52.dp,
         )
@@ -1883,7 +1901,7 @@ private fun DeckColumnExpanded(
             modifier = Modifier.fillMaxWidth(),
             locked = state.isLocked,
         )
-        HotCueGrid(hotCues = state.hotCues, deck = deck, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
+        DeckPadPanel(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
         EchoRow(state = state, deck = deck, accent = accent, modifier = Modifier.fillMaxWidth(), locked = state.isLocked)
 
         // One row of four, not two rows of two: this column has real
@@ -1927,11 +1945,7 @@ private fun DeckColumnExpanded(
                     modifier = Modifier.size(24.dp)
                 )
             }
-            Text(
-                "${format(state.positionMs)} / ${format(state.durationMs)}",
-                color = Color.Gray,
-                style = MaterialTheme.typography.labelSmall
-            )
+            DeckTimeReadout(state = state)
         }
 
         // GAIN's label sits inline with its slider (EqBandRow's own

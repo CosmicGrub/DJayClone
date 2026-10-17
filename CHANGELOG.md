@@ -1,5 +1,21 @@
 # Changelog
 
+## [v0.16.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.16.0) - 2026-10-16
+
+**Quality-of-life wave 1: performance controls, memory and safety nets** (djay Pro parity).
+
+- **Saved cues and loops per track.** Cue point, loop and hot cues are remembered for each file and restored when you load it again (validated against the track's length, so a different file with the same name is never mis-applied). Settings has a "Forget saved cues & loops" button. Excluded from Auto Backup.
+- **Loop/Jump pads.** New LOOP | JUMP tab on the pad panel: loop halve / double / move, and beat jumps of -4, -1, +1, +4 beats. Beat-loop chips light only when the active loop really is that length; tapping a lit chip turns the loop off.
+- **Tap or drag the waveform to seek**; locked decks ignore it.
+- **Time readout:** tap to toggle elapsed / remaining; pulses red in the last 30 s.
+- **Crossfader curves** (Smooth, Linear, Sharp) and **reverse crossfader**, with labels that follow.
+- **Safer loading:** optional confirmation before loading onto a playing deck, locked decks refuse loads, and playback errors now say what went wrong in plain language.
+- **Undo for deleted hot cues** (5 s).
+- **Keep screen on** while playing or recording (setting).
+- Crossfader and sync state now live in an activity-scoped ViewModel, so they survive navigation to Settings.
+- Fixes: seeking an ended deck no longer starts audio; a VIEW intent is not re-handled after rotation/fold; a beat loop clamped by the track end no longer claims a false beat length.
+- Tests: 88 JVM tests (new: mixer maths, transport maths, track-state codec, guards).
+
 ## [v0.15.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.15.0) - 2026-09-28
 
 Two more items from the same audit that produced v0.14.0.

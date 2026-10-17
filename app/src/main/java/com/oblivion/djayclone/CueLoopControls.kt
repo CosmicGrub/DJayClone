@@ -17,12 +17,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -230,7 +238,11 @@ fun BeatLoopChips(
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         beatOptions.forEach { (beats, label) ->
-            val active = state.loopBeats == beats
+            // Lit only while that beat loop is actually RUNNING. It used to be
+            // `loopBeats == beats` alone, so a chip stayed lit after the loop
+            // was exited (the points are kept so LOOP can re-engage them),
+            // and a tap on a stale-lit chip then cleared IN/OUT.
+            val active = state.loopActive && state.loopBeats == beats
             Box(
                 modifier = Modifier
                     .size(width = 36.dp, height = 28.dp)
@@ -250,7 +262,11 @@ fun BeatLoopChips(
                                 // a scroll-cancelled touch on a chip must not
                                 // still arm or clear a loop.
                                 if (waitForUpOrCancellation() != null) {
-                                    if (active) deck.clearLoop() else deck.setBeatLoop(beats)
+                                    // A lit chip exits the loop (djay: tapping an
+                                    // active loop button releases it); IN/OUT are
+                                    // kept so LOOP can re-engage. A long-press on
+                                    // LOOP is the explicit "clear" gesture.
+                                    if (active) deck.toggleLoop() else deck.setBeatLoop(beats)
                                 }
                             }
                         } else Modifier
@@ -279,6 +295,7 @@ fun HotCueGrid(
     modifier: Modifier = Modifier,
     locked: Boolean = false,
 ) {
+    val haptic = LocalHapticFeedback.current
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         hotCues.chunked(4).forEachIndexed { row, chunk ->
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -298,7 +315,12 @@ fun HotCueGrid(
                             .combinedClickable(
                                 enabled = !locked,
                                 onClick = { deck.hotCueTap(index) },
-                                onLongClick = { if (filled) deck.clearHotCue(index) }
+                                onLongClick = {
+                                    if (filled) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        deck.clearHotCue(index) // undoable for a few seconds
+                                    }
+                                }
                             ),
                         contentAlignment = Alignment.Center
                     ) {
@@ -336,4 +358,144 @@ private fun formatHotCueTimestamp(ms: Long): String {
     val m = totalSec / 60
     val s = totalSec % 60
     return "%d:%02d".format(m, s)
+}
+
+/** Which page the deck's pad area is showing. djay switches its pad grid
+ * between modes (cues, loops, ...) rather than stacking every control; this
+ * keeps the deck's vertical budget (the Expanded column is measured to the
+ * pixel) while adding loop resize/move and beat jump. */
+enum class PadMode(val label: String) {
+    CUES("CUES"),
+    LOOP("LOOP · JUMP"),
+}
+
+/**
+ * The deck's pad area: a two-segment mode switch above either the hot-cue
+ * grid or the loop/jump pad. Both pages use the same 44dp key footprint, so
+ * switching pages never changes the deck's height (with the default 8 pads).
+ * The chosen page survives recomposition and configuration changes
+ * (rememberSaveable), independently per deck.
+ */
+@Composable
+fun DeckPadPanel(
+    state: DeckUiState,
+    deck: DeckViewModel,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    locked: Boolean = false,
+) {
+    var mode by rememberSaveable { mutableStateOf(PadMode.CUES) }
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        val cleared = state.clearedHotCue
+        if (cleared != null) {
+            // Swapped into the tab row's own slot (constant panel height - the
+            // Expanded column is budgeted to the pixel); expires after 5 s in
+            // DeckViewModel, so it cannot outlive the moment it was useful.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "UNDO DELETE CUE ${cleared.index + 1}",
+                    color = accent,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .clickable(onClickLabel = "Restore hot cue ${cleared.index + 1}", role = Role.Button) { deck.undoClearHotCue() }
+                        .padding(vertical = 4.dp, horizontal = 2.dp)
+                )
+            }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                PadMode.values().forEach { m ->
+                    val selected = m == mode
+                    Text(
+                        m.label,
+                        color = if (selected) accent else Color.Gray,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        modifier = Modifier
+                            .clickable(onClickLabel = "Show ${m.label} pads", role = Role.Tab) { mode = m }
+                            .padding(vertical = 4.dp, horizontal = 2.dp)
+                    )
+                }
+            }
+        }
+        when (mode) {
+            PadMode.CUES -> HotCueGrid(hotCues = state.hotCues, deck = deck, modifier = Modifier.fillMaxWidth(), locked = locked)
+            PadMode.LOOP -> LoopJumpPad(state = state, deck = deck, accent = accent, locked = locked)
+        }
+    }
+}
+
+/**
+ * Loop resize/move and beat jump, as two rows of four 44dp keys (the same
+ * footprint as two rows of hot-cue pads):
+ *
+ *   ‹    ÷2   ×2   ›      - slide the loop earlier/later; halve; double
+ *   -4   -1   +1   +4     - jump the playhead by whole beats of the tempo
+ *
+ * Plain `clickable` (not hand-rolled gesture code): these are momentary taps
+ * with no press/release semantics, `clickable` already cooperates with the
+ * ancestor verticalScroll, and it supplies button semantics for TalkBack.
+ * Keys are disabled - and the click handler not attached at all - while the
+ * deck is locked or the precondition is missing (no loop to resize; no BPM
+ * to jump by).
+ */
+@Composable
+fun LoopJumpPad(
+    state: DeckUiState,
+    deck: DeckViewModel,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    locked: Boolean = false,
+) {
+    val canLoop = state.loopInMs != null && state.loopOutMs != null && !locked
+    val canJump = state.bpm != null && !locked
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            PadKey("‹", "Move loop earlier", accent, canLoop) { deck.loopMove(-1) }
+            PadKey("÷2", "Halve loop", accent, canLoop) { deck.loopHalve() }
+            PadKey("×2", "Double loop", accent, canLoop) { deck.loopDouble() }
+            PadKey("›", "Move loop later", accent, canLoop) { deck.loopMove(+1) }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            PadKey("−4", "Jump back 4 beats", accent, canJump) { deck.beatJump(-4f) }
+            PadKey("−1", "Jump back 1 beat", accent, canJump) { deck.beatJump(-1f) }
+            PadKey("+1", "Jump forward 1 beat", accent, canJump) { deck.beatJump(1f) }
+            PadKey("+4", "Jump forward 4 beats", accent, canJump) { deck.beatJump(4f) }
+        }
+    }
+}
+
+@Composable
+private fun PadKey(
+    label: String,
+    description: String,
+    accent: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    // 44dp touch target around a 34dp visual chip - the HotCueGrid pattern.
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .then(
+                if (enabled) Modifier.clickable(onClickLabel = description, role = Role.Button, onClick = onClick)
+                else Modifier
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(if (enabled) Color(0xFF232328) else Color(0xFF17171A), RoundedCornerShape(4.dp))
+                .border(1.dp, Color.Gray.copy(alpha = if (enabled) 0.5f else 0.2f), RoundedCornerShape(4.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                label,
+                color = if (enabled) accent else Color.DarkGray,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1
+            )
+        }
+    }
 }

@@ -13,14 +13,18 @@ import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.mp3.Mp3Extractor
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-private const val MIN_LOOP_MS = 20L
+private const val MIN_LOOP_MS = TransportMath.MIN_LOOP_MS
 // Fallback used only for the brief instant between DeckUiState's default
 // construction and init{} applying the real, current SettingsRepository
 // value - not a source of truth (that's AppSettings.hotCueCount now).
@@ -32,6 +36,10 @@ private const val DEFAULT_HOT_CUE_COUNT = 8
  * can't decode natively can be added later via the FFmpeg extension without
  * changing this class's public surface.
  */
+/** The hot cue most recently deleted, kept briefly so the DJ can UNDO a
+ * long-press that was a slip, rather than losing a cue mid-set. */
+data class ClearedHotCue(val index: Int, val positionMs: Long)
+
 data class DeckUiState(
     val trackName: String = "No track loaded",
     val isPlaying: Boolean = false,
@@ -107,6 +115,10 @@ data class DeckUiState(
     // is gated. The lock toggle control itself is deliberately excluded from
     // this gate everywhere it's wired, or there'd be no way back out.
     val isLocked: Boolean = false,
+
+    // Set by clearHotCue(), consumed by undoClearHotCue() or expired by the
+    // UI after a few seconds (dismissClearedHotCue()).
+    val clearedHotCue: ClearedHotCue? = null,
 )
 
 class DeckViewModel(application: Application) : AndroidViewModel(application) {
@@ -152,6 +164,21 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
     // Stage 8: user-adjustable FX ranges, hot cue count, playback defaults.
     private val settingsRepository = SettingsRepository.get(application)
 
+    // Per-track cue / hot-cue / loop persistence (see TrackState.kt). The two
+    // uris implement a small handshake so a save can never write one track's
+    // (briefly empty, mid-load) state over another track's saved record:
+    //  - pendingRestoreUri: loadTrack() set it; cleared once the player is
+    //    READY and any saved state has been applied.
+    //  - persistUri: only after that restore is the deck "armed" for this uri;
+    //    saves for any other uri (or while unarmed) are ignored.
+    private val trackStateRepo = TrackStateRepository.get(application)
+    private var pendingRestoreUri: Uri? = null
+    // What this deck last read from / wrote to storage. A flush with nothing
+    // changed since is a no-op, so a deck can never write STALE in-memory
+    // state over storage (e.g. over a 'Forget saved cues' made in Settings).
+    private var lastPersisted: Persisted? = null
+    private var persistUri: Uri? = null
+
     // Real device library confirmed this is needed: a plain MP3 extractor
     // configuration seeks a VBR file by interpolating from the bitrate of
     // whatever it has already read, which can land up to roughly a second or
@@ -190,8 +217,18 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(isPlaying = isPlaying)
             }
 
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                if (player.playbackState == Player.STATE_READY) maybeRestoreTrackState()
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY) maybeRestoreTrackState()
+            }
+
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                _state.value = _state.value.copy(error = error.message)
+                // Plain-language text for the deck's error banner; the raw
+                // exception message ("Source error") means nothing mid-set.
+                _state.value = _state.value.copy(error = PlaybackErrorText.describe(error.errorCode))
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -272,6 +309,19 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        // Persist cue/hot-cue/loop edits ~0.4 s after the last change. Only the
+        // persisted fields are watched (not position/playing, which change
+        // constantly), and persistTrackStateNow() itself refuses to write
+        // unless this deck is armed for the loaded uri.
+        @OptIn(FlowPreview::class)
+        viewModelScope.launch {
+            _state
+                .map { Persisted(it.uri, it.cuePointMs, it.loopInMs, it.loopOutMs, it.loopBeats, it.hotCues) }
+                .distinctUntilChanged()
+                .debounce(400)
+                .collect { persistTrackStateNow() }
+        }
+
         // Stage 8: read current settings synchronously FIRST and apply them
         // directly - correctness here doesn't depend on collect{}'s first-
         // emission timing (which would work too via viewModelScope's
@@ -288,6 +338,81 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             settingsRepository.settings.drop(1).collect { applyConfig(it) }
         }
+    }
+
+    private data class Persisted(
+        val uri: Uri?,
+        val cue: Long?,
+        val loopIn: Long?,
+        val loopOut: Long?,
+        val loopBeats: Float?,
+        val hotCues: List<Long?>,
+    )
+
+    /** Applies this track's saved cues/loop once the player knows its real
+     * duration (needed to validate the record against the file). Skipped if
+     * the DJ already touched cues/loops in the meantime, or the "keep loops/
+     * cues across track load" setting carried some over - those explicit
+     * actions win. Always arms saving for this uri, restored or not. */
+    private fun maybeRestoreTrackState() {
+        val uri = pendingRestoreUri ?: return
+        val st = _state.value
+        if (st.uri != uri) return
+        val duration = player.duration
+        if (duration <= 0 || duration == C.TIME_UNSET) return
+        pendingRestoreUri = null
+
+        val saved = trackStateRepo.get(TrackId.from(uri))?.let { TrackStateCodec.validated(it, duration) }
+        val count = settingsRepository.settings.value.hotCueCount
+        val live = TrackStateCodec.Live(st.cuePointMs, st.loopInMs, st.loopOutMs, st.loopBeats, st.hotCues)
+        val restored = TrackStateCodec.restore(live, saved, count)
+        if (restored != live) {
+            _state.value = st.copy(
+                cuePointMs = restored.cuePointMs,
+                hotCues = restored.hotCues,
+                loopInMs = restored.loopInMs,
+                loopOutMs = restored.loopOutMs,
+                loopBeats = restored.loopBeats,
+                loopActive = false, // a saved loop comes back armed-but-off, never auto-looping
+            )
+        }
+        // What storage holds right now equals the live state (or the DJ's
+        // carried state, which is deliberately NOT written until they edit).
+        lastPersisted = if (saved != null) currentPersisted() else null
+        persistUri = uri
+    }
+
+    /** Writes the loaded track's cue/hot-cue/loop state - only when armed for
+     * the current uri. Hot-cue slots beyond the current pad count are carried
+     * over from the previous record (see TrackStateCodec.mergeHotCues). */
+    private fun currentPersisted(): Persisted {
+        val st = _state.value
+        return Persisted(st.uri, st.cuePointMs, st.loopInMs, st.loopOutMs, st.loopBeats, st.hotCues)
+    }
+
+    private fun persistTrackStateNow() {
+        val st = _state.value
+        val uri = st.uri ?: return
+        if (uri != persistUri) return
+        val snapshot = currentPersisted()
+        if (snapshot == lastPersisted) return // nothing new since the last read/write
+        val duration = player.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: st.durationMs
+        if (duration <= 0) return
+        val id = TrackId.from(uri)
+        val previous = trackStateRepo.get(id)?.let { TrackStateCodec.validated(it, duration) }
+        val loopOk = st.loopInMs != null && st.loopOutMs != null
+        lastPersisted = snapshot
+        trackStateRepo.put(
+            id,
+            SavedTrackState(
+                durationMs = duration,
+                cuePointMs = st.cuePointMs,
+                loopInMs = if (loopOk) st.loopInMs else null,
+                loopOutMs = if (loopOk) st.loopOutMs else null,
+                loopBeats = if (loopOk) st.loopBeats else null,
+                hotCues = TrackStateCodec.mergeHotCues(st.hotCues, previous?.hotCues),
+            )
+        )
     }
 
     private fun applyConfig(settings: AppSettings) {
@@ -310,6 +435,14 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadTrack(uri: Uri, displayName: String?) {
+        // Save the OUTGOING track's cues/loop before anything is reset - the
+        // debounced saver would otherwise lose an edit made in the last
+        // fraction of a second, and must not see the cleared state below as
+        // the new truth for the old uri.
+        persistTrackStateNow()
+        persistUri = null
+        lastPersisted = null
+        pendingRestoreUri = uri
         disarmLoop()
         // Explicit, defense-in-depth silence of the echo delay line's
         // audible content on every track change - independent of whatever
@@ -327,6 +460,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         val current = _state.value
         _state.value = current.copy(
             error = null,
+            clearedHotCue = null,
             waveform = null,
             spectral = null,
             bpm = null,
@@ -720,7 +854,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
      * is unknown (isAnalyzing or detection failed). */
     fun setBeatLoop(beats: Float) {
         val bpm = _state.value.bpm ?: return
-        val lengthMs = BeatTimeMath.beatsToSourceMs(bpm, beats).toLong().coerceAtLeast(MIN_LOOP_MS)
+        val lengthMs = Math.round(BeatTimeMath.beatsToSourceMs(bpm, beats)).coerceAtLeast(MIN_LOOP_MS)
         val inMs = player.currentPosition
         var outMs = inMs + lengthMs
         val dur = _state.value.durationMs
@@ -740,7 +874,11 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         // musical one. Bail out instead.
         if (outMs <= inMs + MIN_LOOP_MS) return
         disarmLoop()
-        _state.value = _state.value.copy(loopInMs = inMs, loopOutMs = outMs, loopActive = true, loopBeats = beats)
+        // If the end of the track squeezed the loop, its length no longer
+        // matches the chip: drop the label (chip unlit, halve/double work
+        // from the real length).
+        val clamped = outMs != inMs + lengthMs
+        _state.value = _state.value.copy(loopInMs = inMs, loopOutMs = outMs, loopActive = true, loopBeats = if (clamped) null else beats)
         startLoopWatcher(outMs)
     }
 
@@ -784,6 +922,90 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ---------------------------------------------------------------------
+    // Loop resize/move, beat jump and waveform seek (djay parity). The
+    // arithmetic lives in TransportMath (pure, JVM-tested); these are the
+    // state/player plumbing around it.
+    // ---------------------------------------------------------------------
+
+    /** ExoPlayer leaves playWhenReady=true at STATE_ENDED, so a bare seekTo()
+     * re-enters buffering and starts audio while the UI still shows Play.
+     * A seek from the ended state should only move the playhead. */
+    private fun seekKeepingTransport(targetMs: Long) {
+        if (player.playbackState == Player.STATE_ENDED) player.playWhenReady = false
+        player.seekTo(targetMs)
+    }
+
+    private fun currentLoop(): TransportMath.Loop? {
+        val st = _state.value
+        val i = st.loopInMs ?: return null
+        val o = st.loopOutMs ?: return null
+        return if (o > i) TransportMath.Loop(i, o, st.loopBeats) else null
+    }
+
+    /** Applies a resized/moved loop. An inactive (exited) loop just has its
+     * stored points updated; an active one also re-arms the watcher on the
+     * new out point and pulls the playhead back inside if it now lies outside. */
+    private fun applyLoop(l: TransportMath.Loop) {
+        val wasActive = _state.value.loopActive
+        _state.value = _state.value.copy(loopInMs = l.inMs, loopOutMs = l.outMs, loopBeats = l.beats)
+        if (wasActive) {
+            if (player.currentPosition !in l.inMs until l.outMs) player.seekTo(l.inMs)
+            startLoopWatcher(l.outMs)
+        }
+    }
+
+    /** Half the current loop (keeps IN). No-op without a loop or below the minimum length. */
+    fun loopHalve() {
+        val l = currentLoop() ?: return
+        TransportMath.halve(l, _state.value.bpm)?.let(::applyLoop)
+    }
+
+    /** Double the current loop (keeps IN). No-op if it would pass the end of the track. */
+    fun loopDouble() {
+        val l = currentLoop() ?: return
+        TransportMath.double(l, _state.value.bpm, _state.value.durationMs)?.let(::applyLoop)
+    }
+
+    /** Slide the loop one loop-length later (+1) or earlier (-1), keeping its
+     * length. If the playhead is inside an active loop it moves with it, so
+     * the phase within the loop is preserved instead of snapping to IN. */
+    fun loopMove(direction: Int) {
+        val l = currentLoop() ?: return
+        val moved = TransportMath.move(l, direction, _state.value.durationMs) ?: return
+        val pos = player.currentPosition
+        if (_state.value.loopActive && pos in l.inMs until l.outMs) {
+            player.seekTo(pos + (moved.inMs - l.inMs))
+        }
+        applyLoop(moved)
+    }
+
+    /** Jump [beats] beats (negative = back) from the playhead, in whole beats
+     * of the analysed tempo. Inside an active loop the jump wraps within the
+     * loop rather than escaping it. No-op without a detected BPM. */
+    fun beatJump(beats: Float) {
+        val st = _state.value
+        var target = TransportMath.beatJumpTarget(player.currentPosition, st.bpm, beats, st.durationMs) ?: return
+        if (st.loopActive) target = TransportMath.wrapIntoLoop(target, currentLoop())
+        if (TransportMath.samePosition(target, player.currentPosition, 2L)) return // wrapped onto itself: no seek, no audio flush
+        previewActive = false
+        seekKeepingTransport(target)
+        _state.value = _state.value.copy(positionMs = target)
+    }
+
+    /** Tap/drag-release on the waveform: seek to [fraction] (0..1) of the
+     * track. Seeking outside an active loop exits it (otherwise the loop
+     * watcher would immediately drag the playhead back). */
+    fun seekToFraction(fraction: Float) {
+        val st = _state.value
+        val target = TransportMath.fractionToPositionMs(fraction, st.durationMs) ?: return
+        val l = currentLoop()
+        if (st.loopActive && l != null && target !in l.inMs until l.outMs) exitLoopIfActive()
+        previewActive = false
+        seekKeepingTransport(target)
+        _state.value = _state.value.copy(positionMs = target)
+    }
+
+    // ---------------------------------------------------------------------
     // Hot cues - a fixed bank of markable positions. Unlike the single cue
     // point (which pauses/previews), hot cues always trigger playback - the
     // real-gear distinction between the two.
@@ -813,13 +1035,49 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var clearedExpiryJob: kotlinx.coroutines.Job? = null
+
     fun clearHotCue(index: Int) {
         val cues = _state.value.hotCues
         if (index !in cues.indices) return
-        _state.value = _state.value.copy(hotCues = cues.toMutableList().also { it[index] = null })
+        val removed = cues[index] ?: return
+        _state.value = _state.value.copy(
+            hotCues = cues.toMutableList().also { it[index] = null },
+            clearedHotCue = ClearedHotCue(index, removed),
+        )
+        clearedExpiryJob?.cancel()
+        clearedExpiryJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(5_000)
+            dismissClearedHotCue()
+        }
+    }
+
+    /** Puts back the most recently deleted hot cue - unless that pad has been
+     * re-set in the meantime, in which case the newer cue wins. */
+    fun undoClearHotCue() {
+        val st = _state.value
+        val c = st.clearedHotCue ?: return
+        val cues = st.hotCues
+        if (c.index in cues.indices && cues[c.index] == null) {
+            _state.value = st.copy(
+                hotCues = cues.toMutableList().also { it[c.index] = c.positionMs },
+                clearedHotCue = null,
+            )
+        } else {
+            _state.value = st.copy(clearedHotCue = null)
+        }
+    }
+
+    fun dismissClearedHotCue() {
+        if (_state.value.clearedHotCue != null) _state.value = _state.value.copy(clearedHotCue = null)
+    }
+
+    fun dismissError() {
+        if (_state.value.error != null) _state.value = _state.value.copy(error = null)
     }
 
     override fun onCleared() {
+        persistTrackStateNow()
         disarmLoop()
         player.release()
         super.onCleared()

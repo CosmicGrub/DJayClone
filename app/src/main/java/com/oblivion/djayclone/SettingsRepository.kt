@@ -50,6 +50,19 @@ data class AppSettings(
     // see AudioAnalyzer.estimateAutoGain's own doc for what it computes and
     // why it can only ever attenuate, never boost.
     val autoGainEnabled: Boolean = true,
+    // Crossfader law and orientation (see MixerMath). SMOOTH is what the app
+    // has always done; "reversed" is hamster mode (A on the right).
+    val crossfaderCurve: CrossfaderCurve = CrossfaderCurve.SMOOTH,
+    val crossfaderReversed: Boolean = false,
+    // Deck clock shows time REMAINING ("-1:55") instead of elapsed.
+    // Toggled by tapping the clock itself; persisted so it sticks.
+    val showTimeRemaining: Boolean = false,
+    // Hold the screen awake while a deck is playing or a recording is
+    // running - a DJ set that blanks the screen mid-mix is a disaster.
+    val keepScreenOn: Boolean = true,
+    // Ask before loading a track onto a deck that is currently playing
+    // (see LoadGuard). A locked deck refuses loads regardless.
+    val confirmLoadOnPlayingDeck: Boolean = true,
 )
 
 /**
@@ -70,8 +83,9 @@ data class AppSettings(
  *
  * Persistence note, stated explicitly: this survives normal app UPDATES
  * (new APK installed over old) but is wiped on UNINSTALL or "Clear
- * storage." No cloud backup is configured in this project, so there's no
- * cross-device or backup/restore persistence either.
+ * storage." Android Auto Backup is enabled (allowBackup), so these
+ * settings - and only these; see res/xml/backup_rules.xml - can be restored
+ * from a Google backup after a reinstall or onto a new device.
  */
 class SettingsRepository private constructor(app: Application) {
 
@@ -104,6 +118,15 @@ class SettingsRepository private constructor(app: Application) {
                 ratioToleranceFraction = prefs.getFloat(KEY_SYNC_TOLERANCE, d.tempoSyncConfig.ratioToleranceFraction),
             ),
             autoGainEnabled = prefs.getBoolean(KEY_AUTO_GAIN_ENABLED, d.autoGainEnabled),
+            // Stored by name so reordering the enum can never silently remap
+            // a saved choice; an unknown/removed name falls back to default.
+            crossfaderCurve = runCatching {
+                CrossfaderCurve.valueOf(prefs.getString(KEY_XFADE_CURVE, d.crossfaderCurve.name) ?: d.crossfaderCurve.name)
+            }.getOrDefault(d.crossfaderCurve),
+            crossfaderReversed = prefs.getBoolean(KEY_XFADE_REVERSED, d.crossfaderReversed),
+            showTimeRemaining = prefs.getBoolean(KEY_TIME_REMAINING, d.showTimeRemaining),
+            keepScreenOn = prefs.getBoolean(KEY_KEEP_SCREEN_ON, d.keepScreenOn),
+            confirmLoadOnPlayingDeck = prefs.getBoolean(KEY_CONFIRM_LOAD, d.confirmLoadOnPlayingDeck),
         )
     }
 
@@ -172,6 +195,31 @@ class SettingsRepository private constructor(app: Application) {
         _settings.value = _settings.value.copy(autoGainEnabled = enabled)
     }
 
+    fun setCrossfaderCurve(curve: CrossfaderCurve) {
+        prefs.edit().putString(KEY_XFADE_CURVE, curve.name).apply()
+        _settings.value = _settings.value.copy(crossfaderCurve = curve)
+    }
+
+    fun setKeepScreenOn(on: Boolean) {
+        prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON, on).apply()
+        _settings.value = _settings.value.copy(keepScreenOn = on)
+    }
+
+    fun setConfirmLoadOnPlayingDeck(on: Boolean) {
+        prefs.edit().putBoolean(KEY_CONFIRM_LOAD, on).apply()
+        _settings.value = _settings.value.copy(confirmLoadOnPlayingDeck = on)
+    }
+
+    fun setShowTimeRemaining(remaining: Boolean) {
+        prefs.edit().putBoolean(KEY_TIME_REMAINING, remaining).apply()
+        _settings.value = _settings.value.copy(showTimeRemaining = remaining)
+    }
+
+    fun setCrossfaderReversed(reversed: Boolean) {
+        prefs.edit().putBoolean(KEY_XFADE_REVERSED, reversed).apply()
+        _settings.value = _settings.value.copy(crossfaderReversed = reversed)
+    }
+
     fun setTempoSyncConfig(config: TempoSyncConfig) {
         // 1%-25% - below 1% risks false-positive matches from ordinary BPM-
         // detection jitter; above 25% starts overlapping the real spacing
@@ -204,6 +252,11 @@ class SettingsRepository private constructor(app: Application) {
         private const val KEY_NUDGE_FINE = "nudge_fine"
         private const val KEY_SYNC_TOLERANCE = "sync_ratio_tolerance"
         private const val KEY_AUTO_GAIN_ENABLED = "auto_gain_enabled"
+        private const val KEY_XFADE_CURVE = "crossfader_curve"
+        private const val KEY_XFADE_REVERSED = "crossfader_reversed"
+        private const val KEY_TIME_REMAINING = "show_time_remaining"
+        private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
+        private const val KEY_CONFIRM_LOAD = "confirm_load_on_playing"
 
         @Volatile private var INSTANCE: SettingsRepository? = null
         fun get(app: Application): SettingsRepository =

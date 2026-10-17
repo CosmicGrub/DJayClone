@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ (android:dataExtractionRules): cloud backup AND device-to-device transfer. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Settings roam with Auto Backup; anything keyed by this device's MediaStore
+         ids or SAF grants does NOT. Restored onto another device (or after a
+         media rescan) those ids point at different files: a restored
+         djayclone_track_state would put one song's hot cues on another, and
+         restored manual-import URIs have no grant behind them. -->
+        <exclude domain="sharedpref" path="djayclone_track_state.xml" />
+        <exclude domain="sharedpref" path="djayclone_track_cache.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="djayclone_track_state.xml" />
+        <exclude domain="sharedpref" path="djayclone_track_cache.xml" />
+    </device-transfer>
+</data-extraction-rules>

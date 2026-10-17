@@ -2,6 +2,14 @@ package com.oblivion.djayclone
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
@@ -69,13 +77,53 @@ fun WaveformStrip(
     // Default is the exact figure Compact has always used, so every existing
     // caller (DeckColumnCompact) renders byte-for-byte unchanged.
     heightDp: Dp = 64.dp,
+    // Tap anywhere on the strip, or drag and release, to seek there (the
+    // overview-waveform behaviour every DJ app has). Null (the default)
+    // keeps the strip purely visual, exactly as before. A drag only moves a
+    // preview cursor and seeks ONCE on release: seeking continuously while
+    // dragging would rebuild ExoPlayer's AudioTrack on every move.
+    onSeekFraction: ((Float) -> Unit)? = null,
+    // Deck lock: when locked the gesture detectors are not attached at all
+    // (an unattached detector cannot half-consume a touch that an ancestor
+    // scroll wants), same technique the cue/loop controls use.
+    locked: Boolean = false,
 ) {
     val seed = trackName.hashCode()
+    val seek by rememberUpdatedState(onSeekFraction)
+    var scrub by remember { mutableStateOf<Float?>(null) }
+    val seekable = onSeekFraction != null && !locked && durationMs > 0
     Canvas(
         modifier = modifier
             .fillMaxWidth()
             .height(heightDp)
             .background(Color(0xFF0E0E12))
+            .then(
+                if (seekable) Modifier
+                    .pointerInput(Unit) {
+                        detectTapGestures { offset ->
+                            seek?.invoke((offset.x / size.width).coerceIn(0f, 1f))
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        try {
+                            detectHorizontalDragGestures(
+                                onDragStart = { offset -> scrub = (offset.x / size.width).coerceIn(0f, 1f) },
+                                onDragEnd = { scrub?.let { seek?.invoke(it) }; scrub = null },
+                                onDragCancel = { scrub = null },
+                                onHorizontalDrag = { change, _ ->
+                                    change.consume()
+                                    scrub = (change.position.x / size.width).coerceIn(0f, 1f)
+                                },
+                            )
+                        } finally {
+                            // The detector never calls onDragCancel when its
+                            // coroutine is cancelled (detached mid-drag, lock
+                            // engaged): clear the pending cursor ourselves.
+                            scrub = null
+                        }
+                    }
+                else Modifier
+            )
     ) {
         val barCount = waveform?.size ?: 120
         val barWidth = size.width / barCount
@@ -142,5 +190,12 @@ fun WaveformStrip(
             end = Offset(size.width * progress, size.height),
             strokeWidth = 2f
         )
+
+        // Scrub cursor while a drag is in flight: where the seek will land
+        // on release, in the deck's accent so it reads as "pending".
+        scrub?.let { f ->
+            val x = size.width * f
+            drawLine(accentColor, Offset(x, 0f), Offset(x, size.height), strokeWidth = 4f)
+        }
     }
 }
