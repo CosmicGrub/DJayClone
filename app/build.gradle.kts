@@ -4,6 +4,12 @@ plugins {
 }
 
 android {
+    lint {
+        // Media3's AudioProcessor / renderer APIs are @UnstableApi by design. The
+        // app deliberately builds on them and pins the Media3 version, so the
+        // per-call opt-in marker adds noise (it flags every deck/processor file).
+        disable += "UnsafeOptInUsageError"
+    }
     namespace = "com.oblivion.djayclone"
     compileSdk = 34
 
@@ -11,8 +17,8 @@ android {
         applicationId = "com.oblivion.djayclone"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "0.18.0" // Stages 1-10c complete: playback, mixing, BPM sync,
+        versionCode = 22
+        versionName = "0.18.1" // Stages 1-10c complete: playback, mixing, BPM sync,
         // cue/loop/hot-cues, live-mix recording + export, filter/echo FX,
         // adjustable settings, track library, adaptive tablet/foldable
         // layout including the TableTop posture-aware arrangement (the one

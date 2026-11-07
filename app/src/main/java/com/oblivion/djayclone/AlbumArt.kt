@@ -21,11 +21,27 @@ object AlbumArt {
         try {
             retriever.setDataSource(context, uri)
             val bytes = retriever.embeddedPicture ?: return@withContext null
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            decodeBoundedBitmap(bytes)
         } catch (t: Throwable) {
             null
         } finally {
             try { retriever.release() } catch (_: Throwable) {}
         }
+    }
+}
+
+/** Decode embedded art no larger than ~[maxPx] on its long side. A 4000 px cover
+ * decoded at full size is tens of MB per deck and can exceed the GPU texture limit. */
+fun decodeBoundedBitmap(bytes: ByteArray, maxPx: Int = 768): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    val longSide = maxOf(bounds.outWidth, bounds.outHeight)
+    if (longSide <= 0) return null
+    var sample = 1
+    while (longSide / (sample * 2) >= maxPx) sample *= 2
+    return try {
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+    } catch (_: OutOfMemoryError) {
+        null
     }
 }

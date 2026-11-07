@@ -62,10 +62,15 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     val state: StateFlow<RecordingUiState> = _state.asStateFlow()
 
     init {
-        recoverUnfinishedTake()
+        // The foreground service outlives this ViewModel (swiped from recents,
+        // Activity finished): reattach to a take that is still running or
+        // waiting for Save/Discard instead of showing an idle REC button.
+        if (RecordingService.running) bindToService() else recoverUnfinishedTake()
         refreshIdleStorage()
     }
 
+    // Cleared in unbindService() (also from onCleared), so it cannot outlive this ViewModel.
+    @android.annotation.SuppressLint("StaticFieldLeak")
     private var boundService: RecordingService? = null
     private var pendingFile: File? = null
     private var serviceConnection: ServiceConnection? = null
@@ -93,6 +98,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun bindToService() {
+        unbindService() // never leak a previous connection
         val context = getApplication<Application>()
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -135,7 +141,16 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         _state.value = _state.value.copy(hasPendingRecording = false, recovered = false, elapsedMs = 0L)
         unbindService()
         stopRecordingService()
-        recoverUnfinishedTake() // an older unfinished take may be waiting behind this one
+        recoverLater() // an older unfinished take may be waiting behind this one
+    }
+
+    /** stopService() is asynchronous: give the service a moment to be gone so
+     * the "a recording is live" guard does not hide the next unfinished take. */
+    private fun recoverLater() {
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(700)
+            recoverUnfinishedTake()
+        }
     }
 
     /** Free space for the idle "Space for about ..." line. */
@@ -221,12 +236,18 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.value = _state.value.copy(isSaving = false, hasPendingRecording = false, recovered = false, elapsedMs = 0L)
                 unbindService()
                 stopRecordingService()
-                recoverUnfinishedTake()
-            } catch (e: IOException) {
+                recoverLater()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // ViewModel cleared mid-copy: still remove the half-written row.
+                uri?.let { try { resolver.delete(it, null, null) } catch (_: Exception) { } }
+                throw e
+            } catch (e: Exception) {
                 // Don't leave an orphaned IS_PENDING row in the user's Music
-                // library if the copy itself failed partway through.
-                uri?.let { resolver.delete(it, null, null) }
-                _state.value = _state.value.copy(isSaving = false, error = "Save failed: ${e.message}")
+                // library if the copy itself failed partway through. Any failure
+                // (IO, SecurityException, a provider IllegalState) must end the
+                // saving state instead of crashing or hanging it.
+                uri?.let { try { resolver.delete(it, null, null) } catch (_: Exception) { } }
+                _state.value = _state.value.copy(isSaving = false, error = "Save failed: ${e.message ?: e.javaClass.simpleName}")
             }
         }
     }

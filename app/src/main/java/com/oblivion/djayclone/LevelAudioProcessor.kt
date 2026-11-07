@@ -35,7 +35,13 @@ class LevelAudioProcessor : BaseAudioProcessor() {
         return inputAudioFormat // pure passthrough: output format == input format
     }
 
-    override fun isActive(): Boolean = channelCount > 0 // always active once configured; never gates the signal
+    // No isActive() override: BaseAudioProcessor already reports active exactly
+    // while a format is configured, and resets it on a sink reset. The old
+    // override ignored that reset and could claim "active" with no format.
+    override fun onReset() {
+        channelCount = 0
+        currentLevel = 0f
+    }
 
     override fun queueInput(inputBuffer: ByteBuffer) {
         val remaining = inputBuffer.remaining()

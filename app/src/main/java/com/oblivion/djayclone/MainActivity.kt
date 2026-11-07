@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -171,7 +172,8 @@ class MainActivity : ComponentActivity() {
     private val libraryPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             libraryViewModel.setPermissionDenied(!granted)
-            if (granted) libraryViewModel.refresh()
+            // Also on denial: the spinner must end, and manual/SAF rows still load.
+            libraryViewModel.refresh()
         }
 
     // Stage 9: the Library screen's own bulk "Add from files" action -
@@ -183,9 +185,13 @@ class MainActivity : ComponentActivity() {
     private val addToLibraryLauncher =
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
             uris.forEach { uri ->
-                contentResolver.takePersistableUriPermission(
-                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
+                // A provider that cannot persist a grant throws; one such file
+                // must not abort the rest of the batch (it just won't survive a reboot).
+                runCatching {
+                    contentResolver.takePersistableUriPermission(
+                        uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
             }
             libraryViewModel.onManualImportPicked(uris)
         }
@@ -307,7 +313,7 @@ class MainActivity : ComponentActivity() {
                     // callback param). Both decks keep playing underneath
                     // regardless of which screen is shown, since they live
                     // in Activity-scoped ViewModels independent of it.
-                    var screen by remember { mutableStateOf(AppScreen.MIXER) }
+                    var screen by rememberSaveable { mutableStateOf(AppScreen.MIXER) }
                     pendingLoad?.let { p ->
                         AlertDialog(
                             onDismissRequest = { pendingLoad = null },
@@ -446,9 +452,11 @@ class MainActivity : ComponentActivity() {
     private fun registerImportLauncher(deck: DeckViewModel) =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
             if (uri != null) {
-                contentResolver.takePersistableUriPermission(
-                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
+                runCatching {
+                    contentResolver.takePersistableUriPermission(
+                        uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
                 // Unchanged, still instant - a live-mixing DJ needs this
                 // one-tap load to stay exactly as fast as it's always been.
                 requestLoad(if (deck === deckA) Deck.A else Deck.B, uri, queryDisplayName(uri))
@@ -461,12 +469,14 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun queryDisplayName(uri: Uri): String? {
-        val cursor = contentResolver.query(uri, null, null, null, null) ?: return uri.lastPathSegment
-        cursor.use {
-            val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0 && it.moveToFirst()) return it.getString(idx)
-        }
-        return uri.lastPathSegment
+        // A revoked/unreadable URI or a flaky provider can throw here; the name
+        // is cosmetic, so fall back to the last path segment instead of crashing.
+        return runCatching {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && it.moveToFirst()) it.getString(idx) else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment
     }
 }
 
@@ -526,6 +536,7 @@ fun MixerScreen(
     // screen" regardless of which dispatcher branch is currently rendering
     // it.
     val keyFocusRequester = remember { FocusRequester() }
+    val textEntryActive = remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { keyFocusRequester.requestFocus() }
 
     // Stage 10a: MixerScreen keeps owning state/effects (crossfade math,
@@ -544,6 +555,8 @@ fun MixerScreen(
             // stop working the moment any child control was touched.
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                // Typing in the library search must not trigger play/nudge.
+                if (textEntryActive.value) return@onPreviewKeyEvent false
                 val coarseStep = settings.nudgeCoarsePercent
                 // A locked deck ignores the keyboard too (consume the key so
                 // Space cannot fall through to a focused button).
@@ -558,6 +571,7 @@ fun MixerScreen(
                 }
             }
     ) {
+        androidx.compose.runtime.CompositionLocalProvider(LocalTextEntryActive provides textEntryActive) {
         MixerArrangement(
             deckA = deckA,
             deckB = deckB,
@@ -582,6 +596,7 @@ fun MixerScreen(
             onAddFromFiles = onAddFromFiles,
             onRequestLibraryPermission = onRequestLibraryPermission,
         )
+        }
     }
 }
 
@@ -829,7 +844,9 @@ private fun DeckGlancePane(
         }
 
         DeckErrorBanner(state = state, deck = deck)
-        val progress = if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
+        // The waveform covers the analysed span (up to 3 min), not always the whole track.
+        val waveSpan = if (state.waveformSpanMs > 0) minOf(state.waveformSpanMs, state.durationMs) else state.durationMs
+        val progress = if (waveSpan > 0) (state.positionMs.toFloat() / waveSpan).coerceIn(0f, 1f) else 0f
         WaveformStrip(
             trackName = state.trackName,
             progress = progress,
@@ -837,7 +854,7 @@ private fun DeckGlancePane(
             waveform = state.waveform,
             spectral = state.spectral,
             isAnalyzing = state.isAnalyzing,
-            durationMs = state.durationMs,
+            durationMs = waveSpan,
             cuePointMs = state.cuePointMs,
             loopInMs = state.loopInMs,
             loopOutMs = state.loopOutMs,
@@ -1663,7 +1680,9 @@ private fun DeckColumnCompact(
         }
 
         DeckErrorBanner(state = state, deck = deck)
-        val progress = if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
+        // The waveform covers the analysed span (up to 3 min), not always the whole track.
+        val waveSpan = if (state.waveformSpanMs > 0) minOf(state.waveformSpanMs, state.durationMs) else state.durationMs
+        val progress = if (waveSpan > 0) (state.positionMs.toFloat() / waveSpan).coerceIn(0f, 1f) else 0f
         WaveformStrip(
             trackName = state.trackName,
             progress = progress,
@@ -1671,7 +1690,7 @@ private fun DeckColumnCompact(
             waveform = state.waveform,
             spectral = state.spectral,
             isAnalyzing = state.isAnalyzing,
-            durationMs = state.durationMs,
+            durationMs = waveSpan,
             cuePointMs = state.cuePointMs,
             loopInMs = state.loopInMs,
             loopOutMs = state.loopOutMs,
@@ -1689,7 +1708,7 @@ private fun DeckColumnCompact(
         // than showing every control permanently. The cue/loop state is
         // still always visible for free on the waveform overlay above even
         // while this panel is collapsed.
-        var showCueLoopPanel by remember { mutableStateOf(false) }
+        var showCueLoopPanel by rememberSaveable { mutableStateOf(false) }
         TextButton(
             onClick = { showCueLoopPanel = !showCueLoopPanel },
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
@@ -1942,7 +1961,9 @@ private fun DeckColumnExpanded(
         }
 
         DeckErrorBanner(state = state, deck = deck)
-        val progress = if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
+        // The waveform covers the analysed span (up to 3 min), not always the whole track.
+        val waveSpan = if (state.waveformSpanMs > 0) minOf(state.waveformSpanMs, state.durationMs) else state.durationMs
+        val progress = if (waveSpan > 0) (state.positionMs.toFloat() / waveSpan).coerceIn(0f, 1f) else 0f
         WaveformStrip(
             trackName = state.trackName,
             progress = progress,
@@ -1950,7 +1971,7 @@ private fun DeckColumnExpanded(
             waveform = state.waveform,
             spectral = state.spectral,
             isAnalyzing = state.isAnalyzing,
-            durationMs = state.durationMs,
+            durationMs = waveSpan,
             cuePointMs = state.cuePointMs,
             loopInMs = state.loopInMs,
             loopOutMs = state.loopOutMs,
@@ -2063,7 +2084,9 @@ private fun LevelMeter(deck: DeckViewModel, color: Color, modifier: Modifier = M
     var level by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(deck) {
         while (isActive) {
-            level = deck.currentLevel
+            // A paused or ended deck processes no audio, so the processor's last
+            // block would otherwise stay pinned on the meter.
+            level = if (deck.player.isPlaying) deck.currentLevel else 0f
             delay(66L)
         }
     }

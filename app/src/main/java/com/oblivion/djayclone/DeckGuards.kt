@@ -38,6 +38,7 @@ object LoadGuard {
  */
 object PlaybackErrorText {
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun describe(errorCode: Int): String = when (errorCode) {
         PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ->
             "Can't find this file - it may have been moved, renamed or deleted."

@@ -99,8 +99,39 @@ class SettingsRepository private constructor(app: Application) {
     // clear() can never touch unrelated prefs some future feature adds.
     private val prefs = app.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private val _settings = MutableStateFlow(loadFromPrefs())
+    private val _settings = MutableStateFlow(safeLoad())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
+
+    /** Prefs can come back from Auto Backup / an older build with an out-of-range
+     * value or a key of another type; clamp like the setters do, and fall back
+     * to defaults rather than crash while the singleton is being built. */
+    private fun safeLoad(): AppSettings = try {
+        sanitize(loadFromPrefs())
+    } catch (e: Exception) {
+        AppSettings()
+    }
+
+    private fun sanitize(a: AppSettings): AppSettings {
+        val d = AppSettings()
+        fun f(v: Float, lo: Float, hi: Float, def: Float) = if (v.isNaN()) def else v.coerceIn(lo, hi)
+        return a.copy(
+            filterRange = FilterRangeConfig(
+                lpfMinHz = f(a.filterRange.lpfMinHz, 60f, 1000f, d.filterRange.lpfMinHz),
+                hpfMaxHz = f(a.filterRange.hpfMaxHz, 2000f, 15000f, d.filterRange.hpfMaxHz),
+            ),
+            echoRange = EchoRangeConfig(
+                maxFeedbackGain = f(a.echoRange.maxFeedbackGain, 0.1f, 0.7f, d.echoRange.maxFeedbackGain),
+                maxWetMix = f(a.echoRange.maxWetMix, 0.5f, 1f, d.echoRange.maxWetMix),
+            ),
+            hotCueCount = a.hotCueCount.coerceIn(4, 16),
+            defaultCrossfaderPosition = f(a.defaultCrossfaderPosition, 0f, 1f, d.defaultCrossfaderPosition),
+            nudgeCoarsePercent = f(a.nudgeCoarsePercent, 0.001f, 0.05f, d.nudgeCoarsePercent),
+            nudgeFinePercent = f(a.nudgeFinePercent, 0.0001f, 0.01f, d.nudgeFinePercent),
+            tempoSyncConfig = TempoSyncConfig(
+                ratioToleranceFraction = f(a.tempoSyncConfig.ratioToleranceFraction, 0.01f, 0.25f, d.tempoSyncConfig.ratioToleranceFraction),
+            ),
+        )
+    }
 
     private fun loadFromPrefs(): AppSettings {
         val d = AppSettings()

@@ -69,12 +69,19 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
      * MediaStore content can change externally (another app adds/removes a
      * file) and a manual row's SAF grant can be externally revoked, neither
      * of which this app gets a push notification for. */
+    private var refreshJob: kotlinx.coroutines.Job? = null
+
     fun refresh() {
         _isLoading.value = true
-        viewModelScope.launch {
-            val tracks = repo.loadLibrary(_sort.value)
-            _allTracks.value = tracks
-            _isLoading.value = false
+        // One load in flight: a slower earlier query must not finish last and
+        // overwrite a newer sort, nor clear the loading flag early.
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
+            try {
+                _allTracks.value = repo.loadLibrary(_sort.value)
+            } finally {
+                _isLoading.value = false
+            }
         }
     }
 

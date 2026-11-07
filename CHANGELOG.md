@@ -1,5 +1,37 @@
 # Changelog
 
+## [v0.18.1](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.18.1) - 2026-11-07
+
+**Audit release: defects found by a full read-through of the code (three independent reviewers plus Android lint), each checked against the source before fixing.**
+
+Playback and analysis
+- **Fixed: a slow analysis could land on the wrong track.** Loading a second track before the first finished analysing put the first track's waveform, BPM, key and auto-gain onto the new one (and could write a foreign BPM into the library cache). Analysis and cover-art loads are now cancelled on load and checked against the loaded track.
+- **Fixed: Play did nothing after a track ran out.** It now restarts from the cue (or the start). Loading a track onto a finished or errored deck no longer starts it on the master output by itself; loop re-arming no longer restarts a finished deck.
+- **Fixed: waveform did not line up on tracks longer than 3 minutes.** The waveform covers the first 3 minutes of analysis, but the playhead, cue, loop markers and tap-to-seek were scaled to the whole track. They now use the span the waveform really covers.
+- **Fixed: analysis could run out of memory or hang.** The decoder boxed every sample (about 190 MB); it now uses a primitive buffer, always releases the codec, honours cancellation, handles output-format changes and gives up on a wedged decoder.
+- **Fixed: echo could not be switched off while a track was analysing** (or when BPM detection failed). Echo now retargets when you correct the BPM.
+- **Fixed: the level meter froze at its last value on pause/end.** `LevelAudioProcessor` no longer overrides `isActive()` incorrectly (an Android lint error that could report "active" after an output reset).
+- Saved-state baseline: cues carried over from the previous track are no longer written as this track's record; a pad tapped before the track is ready still is.
+
+Recording
+- **Fixed: relaunching the app during a recording lost control of it** (idle REC button, no timer, take never offered for Save). The new session reattaches to a live or finished take.
+- **Fixed: a disk or file error during a recording crashed the app or left a frozen timer.** Errors now stop the take visibly with what was saved. Setup failures release the recorder; a bad projection token no longer crashes.
+- The system capture indicator ends when the take stops (not when you Save); audio dropped at the very end is written back as silence; status updates are race-free; Save survives any provider error and cleans up a half-written library row; a second unfinished take is offered after the first is saved or discarded.
+- Missing-permission guard around the recorder (lint error).
+
+App
+- **Fixed: Library showed a spinner forever if storage permission was denied.**
+- **Fixed: the keyboard shortcuts (Space, arrows) fired while typing in the library search** on a keyboard or DeX.
+- **Fixed: the current screen was lost on fold, rotate or resize** (Settings/Library dropped you back on the Mixer; the cue-panel toggle reset).
+- File handling: a provider that cannot persist a URI grant no longer aborts a batch import; removing an imported track frees its grant slot; "Open with" no longer queries the provider unguarded on the main thread.
+- Embedded cover art is decoded at a bounded size (a 4000 px cover could use tens of MB or fail to draw).
+- Settings read back from prefs/backup are validated and clamped; a bad value falls back to defaults instead of crashing at start.
+- Library sort buttons scroll instead of clipping BPM/KEY; only one library refresh runs at a time.
+- Settings switches are now one accessible control (label plus switch, 48 dp).
+- The "Open with" intent filter is no longer BROWSABLE, so a web page cannot push a URI into the app, and is limited to content:// and file:// audio.
+
+Not changed (noted for later): EQ/filter hard-clip with no headroom, phone-landscape layout, accessibility labels on the performance pads, locked decks can still become a sync follower.
+
 ## [v0.18.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.18.0) - 2026-10-17
 
 **Quality-of-life wave 3: recording safety.** Recording had four ways to lose or corrupt a set; they are closed.

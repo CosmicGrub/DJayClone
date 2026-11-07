@@ -62,6 +62,8 @@ data class DeckUiState(
     /** The effective base BPM everything reads: [userBpm] if set, else [analyzedBpm]. */
     val bpm: Float? = null,
     val analyzedBpm: Float? = null,
+    /** Length of track the waveform/spectral arrays cover (analysis decodes a bounded span); 0 = unknown. */
+    val waveformSpanMs: Long = 0L,
     /** A BPM the DJ corrected by hand (saved per track). */
     val userBpm: Float? = null,
     val key: String? = null,      // Camelot notation ("8B" etc), from AudioAnalyzer/KeyDetector
@@ -177,6 +179,9 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
     //    saves for any other uri (or while unarmed) are ignored.
     private val trackStateRepo = TrackStateRepository.get(application)
     private var pendingRestoreUri: Uri? = null
+    private var analysisJob: kotlinx.coroutines.Job? = null
+    private var loadSnapshot: Persisted? = null
+    private var artJob: kotlinx.coroutines.Job? = null
     // What this deck last read from / wrote to storage. A flush with nothing
     // changed since is a no-op, so a deck can never write STALE in-memory
     // state over storage (e.g. over a 'Forget saved cues' made in Settings).
@@ -377,6 +382,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         val restoredBpm = if (st.userBpm == null) saved?.userBpm else null
         if (restoredBpm != null) {
             _state.value = _state.value.copy(userBpm = restoredBpm, bpm = restoredBpm)
+            if (_state.value.echoActive) setEchoDivision(_state.value.echoDivisionBeats)
         }
         if (restored != live) {
             _state.value = _state.value.copy(
@@ -390,7 +396,10 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         }
         // What storage holds right now equals the live state (or the DJ's
         // carried state, which is deliberately NOT written until they edit).
-        lastPersisted = if (saved != null) currentPersisted() else null
+        // With a record: storage == live state. Without one: compare against the
+        // state at load time, so carried-over cues are not written until the DJ
+        // edits, but a pad tapped before the track was ready still is.
+        lastPersisted = if (saved != null) currentPersisted() else loadSnapshot
         persistUri = uri
     }
 
@@ -416,6 +425,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             next = next.copy(loopBeats = BpmMath.relabelLoopBeats(st.loopOutMs - st.loopInMs, effective, LOOP_CHIPS))
         }
         _state.value = next
+        if (next.echoActive && effective != null) setEchoDivision(next.echoDivisionBeats)
         if (effective != null) {
             TrackCacheRepository.get(getApplication()).setCachedBpm(TrackId.from(st.uri), effective)
         }
@@ -498,6 +508,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             spectral = null,
             bpm = null,
             analyzedBpm = null,
+            waveformSpanMs = 0L,
             userBpm = null,
             key = null,
             isAnalyzing = true,
@@ -547,13 +558,23 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
                     .build()
             )
             .build()
+        loadSnapshot = currentPersisted()
+        // ExoPlayer keeps playWhenReady=true after a track ends or errors; the
+        // new track would start on the master output while the UI shows Play.
+        if (player.playbackState == Player.STATE_ENDED || player.playbackState == Player.STATE_IDLE) player.playWhenReady = false
         player.setMediaItem(item)
         player.prepare()
         player.playbackParameters = androidx.media3.common.PlaybackParameters(1f)
 
-        viewModelScope.launch {
+        // A late result for a track that is no longer loaded must never reach
+        // the deck (or the library cache entry of a different file).
+        analysisJob?.cancel()
+        artJob?.cancel()
+        analysisJob = viewModelScope.launch {
             val result = AudioAnalyzer.analyze(getApplication(), uri)
+            if (_state.value.uri != uri) return@launch
             _state.value = _state.value.copy(
+                waveformSpanMs = result?.analyzedMs ?: 0L,
                 waveform = result?.waveform,
                 spectral = result?.spectral,
                 analyzedBpm = result?.bpm,
@@ -603,8 +624,9 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        viewModelScope.launch {
+        artJob = viewModelScope.launch {
             val art = AlbumArt.extract(getApplication(), uri)
+            if (_state.value.uri != uri) return@launch
             _state.value = _state.value.copy(albumArt = art)
         }
     }
@@ -656,7 +678,16 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun togglePlay() {
-        if (player.isPlaying) player.pause() else player.play()
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            // Play after the track ran out: playWhenReady is still true, so a
+            // bare play() is a no-op. Restart from the cue (or the start).
+            if (player.playbackState == Player.STATE_ENDED) {
+                player.seekTo(_state.value.cuePointMs ?: 0L)
+            }
+            player.play()
+        }
     }
 
     /** Live RMS level (0..1), read straight off the audio thread's
@@ -731,9 +762,12 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
      * delay used to stay at 0 (a 1-sample comb filter) until a chip was
      * actually tapped. */
     fun toggleEcho() {
-        val bpm = _state.value.bpm ?: return
         val next = !_state.value.echoActive
-        if (next) {
+        // Turning ON needs a tempo; turning OFF must always work (BPM is null
+        // while a new track analyzes, and echo can carry across loads).
+        val bpm = _state.value.bpm
+        if (next && bpm == null) return
+        if (next && bpm != null) {
             echoProcessor.targetDelaySeconds =
                 BeatTimeMath.beatsToSourceSeconds(bpm, _state.value.echoDivisionBeats).toFloat()
         }
@@ -939,7 +973,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
                 return
             }
             _state.value = st.copy(loopActive = true)
-            if (player.currentPosition !in inMs until outMs) player.seekTo(inMs)
+            if (player.currentPosition !in inMs until outMs) seekKeepingTransport(inMs)
             startLoopWatcher(outMs)
         }
     }
@@ -984,7 +1018,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         val wasActive = _state.value.loopActive
         _state.value = _state.value.copy(loopInMs = l.inMs, loopOutMs = l.outMs, loopBeats = l.beats)
         if (wasActive) {
-            if (player.currentPosition !in l.inMs until l.outMs) player.seekTo(l.inMs)
+            if (player.currentPosition !in l.inMs until l.outMs) seekKeepingTransport(l.inMs)
             startLoopWatcher(l.outMs)
         }
     }
@@ -1032,7 +1066,8 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
      * watcher would immediately drag the playhead back). */
     fun seekToFraction(fraction: Float) {
         val st = _state.value
-        val target = TransportMath.fractionToPositionMs(fraction, st.durationMs) ?: return
+        val span = if (st.waveformSpanMs > 0) minOf(st.waveformSpanMs, st.durationMs) else st.durationMs
+        val target = TransportMath.fractionToPositionMs(fraction, span) ?: return
         val l = currentLoop()
         if (st.loopActive && l != null && target !in l.inMs until l.outMs) exitLoopIfActive()
         previewActive = false

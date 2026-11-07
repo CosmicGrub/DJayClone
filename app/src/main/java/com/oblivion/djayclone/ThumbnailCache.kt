@@ -68,7 +68,7 @@ object ThumbnailCache {
         val full = try {
             retriever.setDataSource(context, track.uri)
             val bytes = retriever.embeddedPicture ?: return null
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            decodeBoundedBitmap(bytes)
         } catch (_: Throwable) {
             null
         } finally {

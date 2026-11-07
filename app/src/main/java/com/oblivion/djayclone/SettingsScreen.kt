@@ -1,6 +1,8 @@
 package com.oblivion.djayclone
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -389,7 +391,13 @@ private fun LabeledSlider(
 @Composable
 private fun SwitchRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        // The whole row is the switch: one TalkBack node named by its label,
+        // and a 48dp-high touch target.
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+            value = checked,
+            role = androidx.compose.ui.semantics.Role.Switch,
+            onValueChange = onCheckedChange,
+        ),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -403,7 +411,8 @@ private fun SwitchRow(label: String, checked: Boolean, onCheckedChange: (Boolean
         )
         Switch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
+            onCheckedChange = null, // handled by the row's toggleable
+
             colors = SwitchDefaults.colors(checkedThumbColor = AccentA, checkedTrackColor = AccentA.copy(alpha = 0.5f))
         )
     }

@@ -124,6 +124,9 @@ class TrackLibraryRepository(private val app: Application) {
 
     fun removeManualImport(uri: Uri) {
         cache.removeManualUri(uri.toString())
+        // Free the persisted-grant slot (the system caps them and silently
+        // evicts the oldest, which would make older rows "Unavailable").
+        runCatching { app.contentResolver.releasePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
     }
 
     private fun queryMediaStore(): List<LibraryTrack> {

@@ -6,6 +6,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.max
@@ -24,6 +25,8 @@ data class AnalysisResult(
     // hard 0f..1f ceiling anyway, so a value >1f could never actually boost
     // anything even if this returned one.
     val autoGain: Float?,
+    /** How much of the track (from 0) the waveform/spectral buckets cover. */
+    val analyzedMs: Long = 0L,
 )
 
 /**
@@ -58,105 +61,135 @@ object AudioAnalyzer {
 
     suspend fun analyze(context: Context, uri: Uri): AnalysisResult? = withContext(Dispatchers.Default) {
         try {
-            decodeToMonoPcm(context, uri)?.let { (pcm, sampleRate) ->
+            decodeToMonoPcm(context, uri) { isActive }?.let { (pcm, sampleRate) ->
                 val waveform = buildWaveform(pcm)
                 val bpm = estimateBpm(pcm, sampleRate)
                 val spectral = buildSpectralWaveform(pcm, sampleRate)
                 val key = KeyDetector.detectKey(pcm, sampleRate)
                 val autoGain = estimateAutoGain(pcm)
-                AnalysisResult(waveform, bpm, spectral, key, autoGain)
+                AnalysisResult(waveform, bpm, spectral, key, autoGain, analyzedMs = pcm.size * 1000L / sampleRate)
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e // a superseded analysis must actually stop
         } catch (t: Throwable) {
             null
         }
     }
 
-    /** Returns (mono PCM as normalized floats -1..1, sample rate) or null on failure. */
-    private fun decodeToMonoPcm(context: Context, uri: Uri): Pair<FloatArray, Int>? {
+    /** Growable primitive float buffer: boxing every sample in an ArrayList<Float>
+     * cost ~190 MB for the 3-minute window and could OOM with both decks loading. */
+    private class FloatSink(initial: Int) {
+        var data = FloatArray(initial.coerceAtLeast(1024))
+        var size = 0
+        fun add(v: Float) {
+            if (size == data.size) data = data.copyOf(minOf(data.size.toLong() * 2, Int.MAX_VALUE.toLong() - 8).toInt())
+            data[size++] = v
+        }
+        fun toArray(): FloatArray = data.copyOf(size)
+    }
+
+    /** Returns (mono PCM as normalized floats -1..1, sample rate) or null on failure.
+     * Codec and extractor are always released, cancellation is honoured, and a
+     * decoder that stops making progress ends the pass instead of spinning. */
+    private fun decodeToMonoPcm(context: Context, uri: Uri, alive: () -> Boolean): Pair<FloatArray, Int>? {
         val extractor = MediaExtractor()
-        extractor.setDataSource(context, uri, null)
+        var codec: MediaCodec? = null
+        try {
+            extractor.setDataSource(context, uri, null)
 
-        var trackIndex = -1
-        var format: MediaFormat? = null
-        for (i in 0 until extractor.trackCount) {
-            val f = extractor.getTrackFormat(i)
-            val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
-            if (mime.startsWith("audio/")) {
-                trackIndex = i
-                format = f
-                break
+            var trackIndex = -1
+            var format: MediaFormat? = null
+            for (i in 0 until extractor.trackCount) {
+                val f = extractor.getTrackFormat(i)
+                val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) {
+                    trackIndex = i
+                    format = f
+                    break
+                }
             }
-        }
-        if (trackIndex == -1 || format == null) {
-            extractor.release()
-            return null
-        }
-        extractor.selectTrack(trackIndex)
+            if (trackIndex == -1 || format == null) return null
+            extractor.selectTrack(trackIndex)
 
-        val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val codec = MediaCodec.createDecoderByType(mime)
-        codec.configure(format, null, null, 0)
-        codec.start()
+            val mime = format.getString(MediaFormat.KEY_MIME)!!
+            val c = MediaCodec.createDecoderByType(mime)
+            codec = c
+            c.configure(format, null, null, 0)
+            c.start()
 
-        val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val channelCount = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT))
-            format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else 1
+            var sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            var channelCount = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT))
+                format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else 1
+            if (channelCount < 1) channelCount = 1
 
-        // Cap analysis to the first ~3 minutes of audio - plenty for waveform
-        // shape and BPM estimation, keeps decode time bounded for long files.
-        val maxSamplesPerChannel = sampleRate * 180
-        val pcmOut = ArrayList<Float>(min(maxSamplesPerChannel, 1_000_000))
+            // Cap analysis to the first ~3 minutes of audio - plenty for waveform
+            // shape and BPM estimation, keeps decode time bounded for long files.
+            // (The waveform therefore covers [0, analyzedMs]; the UI scales to that.)
+            val maxSamplesPerChannel = sampleRate * 180
+            val pcmOut = FloatSink(min(maxSamplesPerChannel, 1_000_000))
 
-        val bufferInfo = MediaCodec.BufferInfo()
-        var inputDone = false
-        var outputDone = false
+            val bufferInfo = MediaCodec.BufferInfo()
+            var inputDone = false
+            var outputDone = false
+            var idleLoops = 0
 
-        while (!outputDone) {
-            if (!inputDone) {
-                val inIndex = codec.dequeueInputBuffer(ANALYSIS_TIMEOUT_US)
-                if (inIndex >= 0) {
-                    val inputBuffer = codec.getInputBuffer(inIndex)!!
-                    val sampleSize = extractor.readSampleData(inputBuffer, 0)
-                    if (sampleSize < 0) {
-                        codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        inputDone = true
-                    } else {
-                        codec.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
-                        extractor.advance()
+            while (!outputDone) {
+                if (!alive()) return null
+                var progressed = false
+                if (!inputDone) {
+                    val inIndex = c.dequeueInputBuffer(ANALYSIS_TIMEOUT_US)
+                    if (inIndex >= 0) {
+                        val inputBuffer = c.getInputBuffer(inIndex)!!
+                        val sampleSize = extractor.readSampleData(inputBuffer, 0)
+                        if (sampleSize < 0) {
+                            c.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            c.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                        progressed = true
                     }
                 }
-            }
 
-            val outIndex = codec.dequeueOutputBuffer(bufferInfo, ANALYSIS_TIMEOUT_US)
-            if (outIndex >= 0) {
-                if (bufferInfo.size > 0) {
-                    val outputBuffer = codec.getOutputBuffer(outIndex)!!
-                    outputBuffer.position(bufferInfo.offset)
-                    outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                    val shortBuf = outputBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                    val frameCount = shortBuf.remaining() / channelCount
-                    for (f in 0 until frameCount) {
-                        var sum = 0
-                        for (c in 0 until channelCount) sum += shortBuf.get(f * channelCount + c)
-                        val monoSample = (sum / channelCount) / 32768f
-                        pcmOut.add(monoSample)
+                val outIndex = c.dequeueOutputBuffer(bufferInfo, ANALYSIS_TIMEOUT_US)
+                if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    // The real output layout can differ from the container's claim.
+                    val out = c.outputFormat
+                    if (out.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) channelCount = out.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+                    if (out.containsKey(MediaFormat.KEY_SAMPLE_RATE)) sampleRate = out.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    progressed = true
+                } else if (outIndex >= 0) {
+                    progressed = true
+                    if (bufferInfo.size > 0) {
+                        val outputBuffer = c.getOutputBuffer(outIndex)!!
+                        outputBuffer.position(bufferInfo.offset)
+                        outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                        val shortBuf = outputBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                        val frameCount = shortBuf.remaining() / channelCount
+                        for (f in 0 until frameCount) {
+                            var sum = 0
+                            for (ch in 0 until channelCount) sum += shortBuf.get(f * channelCount + ch)
+                            pcmOut.add((sum / channelCount) / 32768f)
+                        }
                     }
+                    c.releaseOutputBuffer(outIndex, false)
+                    if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outputDone = true
                 }
-                codec.releaseOutputBuffer(outIndex, false)
-                if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                    outputDone = true
-                }
+
+                if (pcmOut.size >= maxSamplesPerChannel) outputDone = true
+                // ~10 s of no input accepted and no output produced: the decoder is wedged.
+                idleLoops = if (progressed) 0 else idleLoops + 1
+                if (idleLoops > 500) return null
             }
 
-            if (pcmOut.size >= maxSamplesPerChannel) outputDone = true
+            if (pcmOut.size == 0) return null
+            return pcmOut.toArray() to sampleRate
+        } finally {
+            try { codec?.stop() } catch (_: Exception) { }
+            try { codec?.release() } catch (_: Exception) { }
+            try { extractor.release() } catch (_: Exception) { }
         }
-
-        codec.stop()
-        codec.release()
-        extractor.release()
-
-        if (pcmOut.isEmpty()) return null
-        return pcmOut.toFloatArray() to sampleRate
     }
 
     private fun buildWaveform(pcm: FloatArray): FloatArray {

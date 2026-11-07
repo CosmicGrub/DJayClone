@@ -45,12 +45,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!-- Lets "Open with" from a file manager / other app send a
-                 track straight to Deck A - also doubles as our test hook. -->
+                 track straight to Deck A - also doubles as our test hook.
+                 Deliberately NOT BROWSABLE: a web page must not be able to
+                 push a URI into the app via an intent: link. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="audio/*" />
+                <data android:scheme="content" android:mimeType="audio/*" />
+                <data android:scheme="file" android:mimeType="audio/*" />
             </intent-filter>
         </activity>
 

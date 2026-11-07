@@ -31,6 +31,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
@@ -79,7 +81,14 @@ class RecordingService : Service() {
     private val _state = MutableStateFlow(ServiceState())
     val state: StateFlow<ServiceState> = _state.asStateFlow()
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // An uncaught exception in the writer/ticker (disk full between storage
+    // checks, a volume error) must end the take visibly, not kill the process
+    // or leave a frozen timer over a dead writer.
+    private val serviceScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
+            stopRecording("Recording stopped: ${e.message ?: e.javaClass.simpleName} - what was recorded is saved.")
+        }
+    )
     private var pcmChannel = Channel<ByteArray>(capacity = 64)
     private val droppedBytes = AtomicLong(0)
 
@@ -106,7 +115,7 @@ class RecordingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Stop pressed in the notification shade: explicit system-surface action.
         if (intent?.action == ACTION_STOP) {
-            stopRecording()
+            if (captureJob != null) stopRecording() else stopSelfCleanly() // nothing running: don't leave an orphan service
             return START_NOT_STICKY
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
@@ -123,10 +132,21 @@ class RecordingService : Service() {
         // getMediaProjection() on API 34.
         startForeground(NOTIFICATION_ID, buildNotification(recording = false, elapsedMs = 0, level = StorageBudget.Level.OK), foregroundServiceType())
 
-        if (resultData == null || captureJob != null) return START_NOT_STICKY
+        if (captureJob != null) return START_NOT_STICKY // already capturing
+        if (resultData == null) {
+            _state.update { it.copy(error = "Recording could not start (no capture permission).") }
+            stopSelfCleanly()
+            return START_NOT_STICKY
+        }
 
         val projectionManager = getSystemService(MediaProjectionManager::class.java)
-        val projection = projectionManager.getMediaProjection(resultCode, resultData)
+        val projection = try {
+            projectionManager.getMediaProjection(resultCode, resultData)
+        } catch (e: SecurityException) {
+            _state.update { it.copy(error = "Recording permission is no longer valid - tap REC again.") }
+            stopSelfCleanly()
+            return START_NOT_STICKY
+        }
         mediaProjection = projection
         projection.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
@@ -159,11 +179,18 @@ class RecordingService : Service() {
         val encoding = AudioFormat.ENCODING_PCM_16BIT
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig, encoding)
         if (minBuf <= 0) {
-            _state.value = _state.value.copy(error = "This device doesn't support the audio format needed to record.")
+            _state.update { it.copy(error = "This device doesn't support the audio format needed to record.") }
             stopSelfCleanly()
             return
         }
 
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            _state.update { it.copy(error = "Recording needs the microphone-level audio permission. Allow it in Settings and try again.") }
+            stopSelfCleanly()
+            return
+        }
+
+        @android.annotation.SuppressLint("MissingPermission") // checked just above
         val record = try {
             AudioRecord.Builder()
                 .setAudioFormat(
@@ -176,14 +203,18 @@ class RecordingService : Service() {
                 .setBufferSizeInBytes(minBuf * 4)
                 .setAudioPlaybackCaptureConfig(captureConfig)
                 .build()
+        } catch (e: SecurityException) {
+            _state.update { it.copy(error = "Recording permission was refused by the system.") }
+            stopSelfCleanly()
+            return
         } catch (e: UnsupportedOperationException) {
-            _state.value = _state.value.copy(error = "Recording setup failed: ${e.message}")
+            _state.update { it.copy(error = "Recording setup failed: ${e.message}") }
             stopSelfCleanly()
             return
         }
 
         if (record.state != AudioRecord.STATE_INITIALIZED) {
-            _state.value = _state.value.copy(error = "Audio recorder failed to initialize.")
+            _state.update { it.copy(error = "Audio recorder failed to initialize.") }
             record.release()
             stopSelfCleanly()
             return
@@ -201,11 +232,18 @@ class RecordingService : Service() {
         val dir = recordingsDir(this)
         val file = File(dir, "rec_${System.currentTimeMillis()}.wav")
         val marker = File(dir, file.name + ".active")
+        val raf = try {
+            marker.createNewFile()
+            RandomAccessFile(file, "rw").also { it.write(WavHeader.build(rate, channelCount, 16, 0)) }
+        } catch (e: java.io.IOException) {
+            _state.update { it.copy(error = "Couldn't create the recording file: ${e.message}") }
+            record.release()
+            marker.delete()
+            stopSelfCleanly()
+            return
+        }
         outputFile = file
         markerFile = marker
-        marker.createNewFile()
-        val raf = RandomAccessFile(file, "rw")
-        raf.write(WavHeader.build(rate, channelCount, 16, 0))
 
         audioRecord = record
         record.startRecording()
@@ -261,10 +299,9 @@ class RecordingService : Service() {
                     val take = minOf(buf.size.toLong(), room).toInt()
                     if (take > 0) raf.write(buf, 0, take)
                     dataBytes += take
-                    _state.value = _state.value.copy(
-                        elapsedMs = CaptureClock.elapsedMs(dataBytes / blockAlign, rate),
-                        gapCount = gaps,
-                    )
+                    _state.update {
+                        it.copy(elapsedMs = CaptureClock.elapsedMs(dataBytes / blockAlign, rate), gapCount = gaps)
+                    }
                     if (dataBytes - lastPatchBytes >= 2 * bytesPerSec) {
                         patch(); lastPatchBytes = dataBytes
                     }
@@ -274,6 +311,18 @@ class RecordingService : Service() {
                     }
                     if (take < buf.size || WavHeader.isAtLimit(dataBytes, blockAlign)) {
                         stopRecording("Stopped at the 4 GB WAV limit - your recording is saved.")
+                    }
+                }
+                // Audio dropped after the last queued buffer still counts toward
+                // the timeline: write it back as silence before closing.
+                val tail = (droppedBytes.getAndSet(0) / blockAlign) * blockAlign
+                if (tail > 0) {
+                    var left = minOf(tail, WavHeader.maxDataBytes(blockAlign) - dataBytes)
+                    while (left > 0) {
+                        val n = minOf(left, zeros.size.toLong()).toInt()
+                        raf.write(zeros, 0, n)
+                        left -= n
+                        dataBytes += n
                     }
                 }
             } finally {
@@ -300,7 +349,7 @@ class RecordingService : Service() {
                     val stop = StorageBudget.shouldStop(free)
                     val remaining = StorageBudget.remainingMs(free, StorageBudget.RESERVE_BYTES, bytesPerSec, 2)
                     val level = StorageBudget.level(remaining, stop)
-                    _state.value = _state.value.copy(storageRemainingMs = remaining, storageLevel = level)
+                    _state.update { it.copy(storageRemainingMs = remaining, storageLevel = level) }
                     if (stop) {
                         stopRecording("Stopped: storage nearly full - your recording up to this point is saved.")
                         break
@@ -318,7 +367,7 @@ class RecordingService : Service() {
     fun stopRecording(reason: String? = null) {
         if (stopRequested) return
         stopRequested = true
-        if (reason != null) _state.value = _state.value.copy(error = reason)
+        if (reason != null) _state.update { it.copy(error = reason) }
         try { audioRecord?.stop() } catch (_: IllegalStateException) { } // unblocks an in-flight read()
         captureJob?.cancel()
         tickerJob?.cancel()
@@ -328,6 +377,10 @@ class RecordingService : Service() {
             writerJob?.join()
             audioRecord?.release()
             audioRecord = null
+            // The take is on disk: end the projection now so the system's
+            // capture chip/indicator does not linger while Save/Discard waits.
+            try { mediaProjection?.stop() } catch (_: Exception) { }
+            mediaProjection = null
             val finished = outputFile
             // Nulled so a later onStartCommand() sees "not capturing" (a
             // cancelled Job is still non-null).
@@ -336,7 +389,7 @@ class RecordingService : Service() {
             tickerJob = null
             outputFile = null
             markerFile = null
-            _state.value = _state.value.copy(isRecording = false, finishedFile = finished)
+            _state.update { it.copy(isRecording = false, finishedFile = finished) }
             stopForeground(STOP_FOREGROUND_REMOVE)
             // Service stays alive (bound) so RecordingViewModel can read the
             // finished-file state until the user Saves or Discards.

@@ -3,6 +3,7 @@ package com.oblivion.djayclone
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +36,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -100,6 +102,12 @@ fun LibraryScreen(
  * because it's identical in both cases (request once per first composition)
  * and this is the one place both hosts actually share.
  */
+/** True while a text field has focus, so the mixer's global keyboard shortcuts
+ * (Space = play, arrows = nudge) do not eat the characters being typed. */
+val LocalTextEntryActive = androidx.compose.runtime.staticCompositionLocalOf<androidx.compose.runtime.MutableState<Boolean>> {
+    androidx.compose.runtime.mutableStateOf(false)
+}
+
 @Composable
 private fun LibraryListContent(
     library: LibraryViewModel,
@@ -119,12 +127,15 @@ private fun LibraryListContent(
     // arrangement's own first composition, i.e. once per app-in-Expanded
     // session, not re-fired on every recomposition.
     LaunchedEffect(Unit) { onRequestPermission() }
+    val textEntry = LocalTextEntryActive.current
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { textEntry.value = false } }
 
     Column(modifier = modifier) {
         OutlinedTextField(
             value = query,
             onValueChange = { library.setQuery(it) },
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                .onFocusChanged { textEntry.value = it.isFocused },
             placeholder = { Text("Search title, artist, or key (e.g. 8B)", color = Color.DarkGray) },
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = Color.Gray) },
             singleLine = true,
@@ -138,7 +149,10 @@ private fun LibraryListContent(
         )
 
         Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+            // Scrollable: six sort buttons need ~380dp, more than the 280dp
+            // sidebar or a 360dp phone offers (BPM/KEY were being clipped).
+            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+                .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             LibrarySortOrder.values().forEach { option ->
