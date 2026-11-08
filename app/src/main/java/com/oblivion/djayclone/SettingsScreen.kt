@@ -240,13 +240,18 @@ fun SettingsScreen(
             onCheckedChange = { settingsRepo.setTempoFaderInverted(it) }
         )
         SwitchRow(
+            label = "Restore decks when the app reopens",
+            checked = settings.restoreSession,
+            onCheckedChange = { settingsRepo.setRestoreSession(it) }
+        )
+        SwitchRow(
             label = "Keep screen on while playing or recording",
             checked = settings.keepScreenOn,
             onCheckedChange = { settingsRepo.setKeepScreenOn(it) }
         )
         val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
         val trackStateRepo = remember { TrackStateRepository.get(appContext as android.app.Application) }
-        var savedCount by remember { mutableStateOf(trackStateRepo.count()) }
+        var savedCount by remember { mutableStateOf(trackStateRepo.countWithCues()) }
         var confirmForget by remember { mutableStateOf(false) }
         TextButton(onClick = { confirmForget = true }, enabled = savedCount > 0, modifier = Modifier.fillMaxWidth()) {
             Text(
@@ -259,10 +264,10 @@ fun SettingsScreen(
             AlertDialog(
                 onDismissRequest = { confirmForget = false },
                 title = { Text("Forget all saved cues and loops?") },
-                text = { Text("Hot cues, cue points and loops remembered for $savedCount tracks will be permanently removed. Tracks, BPM and key data are not affected.") },
+                text = { Text("Hot cues, cue points and loops remembered for $savedCount tracks will be permanently removed. BPM corrections you made, analysis results and your library are kept.") },
                 confirmButton = {
                     TextButton(onClick = {
-                        trackStateRepo.clearAll(); savedCount = 0; confirmForget = false
+                        trackStateRepo.clearCuesAndLoops(); savedCount = trackStateRepo.countWithCues(); confirmForget = false
                     }) { Text("Forget", color = Color(0xFFFF5A7A)) }
                 },
                 dismissButton = { TextButton(onClick = { confirmForget = false }) { Text("Cancel") } }

@@ -193,8 +193,8 @@ private fun LibraryListContent(
                     items(tracks, key = { it.id.cacheKey() }) { track ->
                         LibraryRow(
                             track = track,
-                            onLoadA = { library.markPlayed(track); onLoadTrack(track, Deck.A) },
-                            onLoadB = { library.markPlayed(track); onLoadTrack(track, Deck.B) },
+                            onLoadA = { onLoadTrack(track, Deck.A) },
+                            onLoadB = { onLoadTrack(track, Deck.B) },
                             onRemove = if (track.isManual) ({ library.removeManualTrack(track) }) else null,
                         )
                     }

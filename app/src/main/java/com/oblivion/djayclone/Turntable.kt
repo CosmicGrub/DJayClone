@@ -48,16 +48,21 @@ fun Turntable(
     onTap: () -> Unit,
 ) {
     val infinite = androidx.compose.animation.core.rememberInfiniteTransition(label = "platter")
-    val rotation by infinite.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rotation"
-    )
-    val effectiveRotation = if (isPlaying) rotation else 0f
+    // The angle is a State read ONLY inside graphicsLayer, so a spinning platter redraws
+    // without recomposing, and a paused one registers no animation at all (the clock idles).
+    val rotation: androidx.compose.runtime.State<Float> = if (isPlaying) {
+        infinite.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1800, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "rotation"
+        )
+    } else {
+        remember { androidx.compose.runtime.mutableStateOf(0f) }
+    }
     val imageBitmap = remember(albumArt) { albumArt?.asImageBitmap() }
 
     Box(
@@ -78,7 +83,7 @@ fun Turntable(
         Box(
             modifier = Modifier
                 .fillMaxSize(0.97f)
-                .graphicsLayer { rotationZ = effectiveRotation }
+                .graphicsLayer { rotationZ = rotation.value }
                 .clip(CircleShape)
                 .background(Color(0xFF0A0A0C)),
             contentAlignment = Alignment.Center

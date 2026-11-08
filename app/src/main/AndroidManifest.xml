@@ -19,6 +19,8 @@
          is gated behind API 29+ at runtime (see RecordingViewModel) - these
          permissions are simply inert/unused below that on older devices. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <!-- API 33+ only, runtime-requested - gates the "Recording..." status
@@ -39,6 +41,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:enableOnBackInvokedCallback="true"
             android:theme="@style/Theme.DJayClone">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -52,7 +55,6 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="content" android:mimeType="audio/*" />
-                <data android:scheme="file" android:mimeType="audio/*" />
             </intent-filter>
         </activity>
 
@@ -60,6 +62,11 @@
              user backgrounding the app mid-recording (Android tears the
              projection down otherwise). foregroundServiceType="mediaProjection"
              is required by the OS on API 34, not just best practice. -->
+        <service
+            android:name=".PlaybackService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false" />
+
         <service
             android:name=".RecordingService"
             android:foregroundServiceType="mediaProjection"

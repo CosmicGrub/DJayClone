@@ -1,5 +1,25 @@
 # Changelog
 
+## [v0.19.0](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.19.0) - 2026-11-07
+
+**Set safety release: the app no longer ends a set, forgets it, or drifts under the OS.** Findings from the full audit (docs/app-audit.md), A1 to A10 plus the release-engineering work.
+
+**One-time reinstall:** this release is signed with a real release key instead of the debug key, so Android will not update over an older install. Uninstall v0.18.x first (saved cues, loops and settings from the old install do not carry over), then install this APK. Future updates install normally.
+
+- **Back no longer ends the set.** Back on the mixer sends the app to the background (decks keep playing, like any music app). It used to finish the Activity and release both players.
+- **Decks keep playing in the background.** A media notification with a Pause-all button and headset/lock-screen button support appears while a deck plays, the CPU is kept awake, and the app is no longer a candidate for reclaiming mid-set. Swiping the app away from recents still ends playback.
+- **The session comes back.** Tracks, positions, tempo, crossfader and sync lock are saved when you leave and every 20 seconds, and restored (paused) on the next launch, including after the system killed the app. Settings > "Restore decks when the app reopens" turns it off. Tracks that are no longer readable are skipped.
+- **Audio focus behaves.** The app takes focus when a deck starts playing, not at launch (opening it no longer interrupts your music), asks again after a call or another app, and rotating no longer hands focus away.
+- **Dialogs survive rotate, fold and DeX resize:** the "Load onto Deck?" confirm, the BPM sheet, the record rationale and the discard confirm. A second "Open with" while a load is waiting now says so instead of replacing it.
+- **No lost edits:** pending cue, loop and BPM edits are written when the app goes to the background.
+- **Locks are honoured by sync.** A locked deck can no longer be retempo'd by SYNC (the buttons dim, and sync waits until you unlock). The fold layout now has a lock control.
+- **Fixes of my own mistakes:** "Forget saved cues and loops" now keeps your BPM corrections and its dialog says so; the library "last played" time is only recorded when a load really happens; turning Auto Gain on or off applies to the track already loaded.
+- **Crash report.** If the app crashes, a short report is saved and offered (Copy / Dismiss) on the next launch.
+- **Smaller and faster to start.** Release builds are now minified and resource-shrunk: the app is about 1.8 MB (was 13.8 MB) with 3 MB of code instead of 47 MB. Verified on an Android 14 emulator: launch, analysis (BPM and key), playback, the playback notification and media session, Back to background, and session restore.
+- **Less background work.** The platter animation no longer recomposes every frame and does not run while paused, the recording clock updates once a second instead of per audio buffer, the level meters poll only while the app is on screen, and idle deck polling slows down.
+- "Open with" no longer accepts file:// links; predictive back is enabled.
+- Tests: 120 JVM tests (new: session codec, forgetting cues while keeping BPM).
+
 ## [v0.18.1](https://github.com/CosmicGrub/DJayClone/releases/tag/v0.18.1) - 2026-11-07
 
 **Audit release: defects found by a full read-through of the code (three independent reviewers plus Android lint), each checked against the source before fixing.**

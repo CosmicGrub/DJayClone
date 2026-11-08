@@ -62,6 +62,8 @@ data class DeckUiState(
     /** The effective base BPM everything reads: [userBpm] if set, else [analyzedBpm]. */
     val bpm: Float? = null,
     val analyzedBpm: Float? = null,
+    /** The Auto Gain trim measured for this track (applied only while the setting is on). */
+    val measuredAutoGain: Float? = null,
     /** Length of track the waveform/spectral arrays cover (analysis decodes a bounded span); 0 = unknown. */
     val waveformSpanMs: Long = 0L,
     /** A BPM the DJ corrected by hand (saved per track). */
@@ -179,6 +181,8 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
     //    saves for any other uri (or while unarmed) are ignored.
     private val trackStateRepo = TrackStateRepository.get(application)
     private var pendingRestoreUri: Uri? = null
+    private var pendingStartMs: Long = 0L
+    private var pendingStartSpeed: Float = 1f
     private var analysisJob: kotlinx.coroutines.Job? = null
     private var loadSnapshot: Persisted? = null
     private var artJob: kotlinx.coroutines.Job? = null
@@ -220,6 +224,8 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         // nearest sync frame (tens of ms wide), so even a perfectly-timed
         // trigger would land in the wrong place.
         player.setSeekParameters(SeekParameters.EXACT)
+        // Keep the CPU awake while a deck plays with the screen off.
+        player.setWakeMode(C.WAKE_MODE_LOCAL)
         player.setHandleAudioBecomingNoisy(settingsRepository.settings.value.pauseOnOutputLoss)
 
         player.addListener(object : Player.Listener {
@@ -315,7 +321,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
-                kotlinx.coroutines.delay(100)
+                kotlinx.coroutines.delay(if (player.isPlaying) 100 else 250)
             }
         }
 
@@ -401,6 +407,16 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         // edits, but a pad tapped before the track was ready still is.
         lastPersisted = if (saved != null) currentPersisted() else loadSnapshot
         persistUri = uri
+        // A restored session starts the deck where it was left (paused).
+        val startMs = pendingStartMs
+        pendingStartMs = 0L
+        if (startMs in 1 until duration - 2_000) {
+            player.seekTo(startMs)
+            _state.value = _state.value.copy(positionMs = startMs)
+        }
+        val startSpeed = pendingStartSpeed
+        pendingStartSpeed = 1f
+        if (startSpeed != 1f) setPlaybackSpeed(startSpeed)
     }
 
     /** Writes the loaded track's cue/hot-cue/loop state - only when armed for
@@ -430,6 +446,9 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             TrackCacheRepository.get(getApplication()).setCachedBpm(TrackId.from(st.uri), effective)
         }
     }
+
+    /** Writes any pending cue/loop/BPM edit now (called when the app goes to the background). */
+    fun flushPersist() = persistTrackStateNow()
 
     private fun persistTrackStateNow() {
         val st = _state.value
@@ -462,6 +481,9 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         echoProcessor.setRangeConfig(settings.echoRange)
         resizeHotCues(settings.hotCueCount)
         player.setHandleAudioBecomingNoisy(settings.pauseOnOutputLoss)
+        // Auto Gain on/off applies to the track already loaded, not only the next one.
+        val trim = if (settings.autoGainEnabled) (_state.value.measuredAutoGain ?: 1f) else 1f
+        if (trim != _state.value.autoGainTrim) _state.value = _state.value.copy(autoGainTrim = trim)
     }
 
     /** Growing: existing entries keep their indices, new trailing slots are
@@ -477,7 +499,11 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(hotCues = resized)
     }
 
-    fun loadTrack(uri: Uri, displayName: String?) {
+    /** [startMs]/[startSpeed] bring back a restored session: applied once the player knows
+     * the track's real duration (see maybeRestoreTrackState), never auto-playing. */
+    fun loadTrack(uri: Uri, displayName: String?, startMs: Long = 0L, startSpeed: Float = 1f) {
+        pendingStartMs = startMs
+        pendingStartSpeed = startSpeed
         // Save the OUTGOING track's cues/loop before anything is reset - the
         // debounced saver would otherwise lose an edit made in the last
         // fraction of a second, and must not see the cleared state below as
@@ -508,6 +534,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             spectral = null,
             bpm = null,
             analyzedBpm = null,
+            measuredAutoGain = null,
             waveformSpanMs = 0L,
             userBpm = null,
             key = null,
@@ -604,6 +631,7 @@ class DeckViewModel(application: Application) : AndroidViewModel(application) {
             // its own or silently disagree with what it visibly shows.
             if (result?.autoGain != null) {
                 TrackCacheRepository.get(getApplication()).setCachedAutoGain(TrackId.from(uri), result.autoGain)
+                _state.value = _state.value.copy(measuredAutoGain = result.autoGain)
                 if (settings.autoGainEnabled) {
                     _state.value = _state.value.copy(autoGainTrim = result.autoGain)
                 }

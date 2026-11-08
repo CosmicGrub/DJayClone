@@ -165,6 +165,12 @@ object TrackStateCodec {
         )
     }
 
+    /** The record with every cue, hot cue and loop removed but a hand-corrected BPM kept;
+     * null when nothing is left. Used by "Forget saved cues and loops". */
+    fun withoutCues(saved: SavedTrackState): SavedTrackState? =
+        saved.copy(cuePointMs = null, loopInMs = null, loopOutMs = null, loopBeats = null, hotCues = emptyList())
+            .takeIf { !it.isEmpty }
+
     /** The saved slots shaped to the current pad count: extra saved slots
      * are held back (see [mergeHotCues]), missing ones are empty. */
     fun hotCuesForCount(saved: List<Long?>, count: Int): List<Long?> = List(count) { saved.getOrNull(it) }

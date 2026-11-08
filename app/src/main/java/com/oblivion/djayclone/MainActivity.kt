@@ -122,8 +122,6 @@ class MainActivity : ComponentActivity() {
     // Load protection (see LoadGuard): every route that puts a track on a deck
     // goes through requestLoad(), which refuses a locked deck and can ask
     // before replacing one that is playing.
-    private data class PendingLoad(val deck: Deck, val uri: Uri, val title: String?)
-    private var pendingLoad by mutableStateOf<PendingLoad?>(null)
 
     private fun deckFor(deck: Deck) = if (deck == Deck.A) deckA else deckB
 
@@ -131,10 +129,10 @@ class MainActivity : ComponentActivity() {
         val vm = deckFor(deck)
         val st = vm.state.value
         when (LoadGuard.decide(st.isLocked, st.isPlaying, settingsRepo.settings.value.confirmLoadOnPlayingDeck)) {
-            LoadGuard.Decision.LOAD -> vm.loadTrack(uri, title)
+            LoadGuard.Decision.LOAD -> { vm.loadTrack(uri, title); libraryViewModel.markPlayedUri(uri) }
             LoadGuard.Decision.REFUSE_LOCKED ->
                 android.widget.Toast.makeText(this, "Deck ${deck.name} is locked", android.widget.Toast.LENGTH_SHORT).show()
-            LoadGuard.Decision.CONFIRM_PLAYING -> pendingLoad = PendingLoad(deck, uri, title)
+            LoadGuard.Decision.CONFIRM_PLAYING -> mixer.setPendingLoad(PendingLoad(deck, uri, title))
         }
     }
 
@@ -256,8 +254,12 @@ class MainActivity : ComponentActivity() {
         projectionLauncher.launch(intent)
     }
 
+    private var crashReport by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
+        if (savedInstanceState == null) crashReport = CrashLog.pending(this)
 
         val pickForA = registerImportLauncher(deckA)
         val pickForB = registerImportLauncher(deckB)
@@ -284,7 +286,44 @@ class MainActivity : ComponentActivity() {
         // the SAME VIEW intent back, which used to re-run the load guard and pop
         // 'Load onto Deck A?' (or a locked-deck toast) mid-set.
         if (savedInstanceState == null) handleViewIntent(intent)
-        requestAudioFocus()
+        // Audio focus and the playback notification follow the decks: asked for when a deck
+        // starts playing, not at launch, and asked for again after an interruption.
+        PlaybackBridge.pauseAll = { deckA.player.pause(); deckB.player.pause() }
+        lifecycleScope.launch {
+            combine(
+                deckA.state.map { it.isPlaying }.distinctUntilChanged(),
+                deckB.state.map { it.isPlaying }.distinctUntilChanged(),
+            ) { a, b -> a to b }.collect { (a, b) ->
+                if (a || b) {
+                    ensureAudioFocus()
+                    val text = when {
+                        a && b -> "Decks A and B playing"
+                        a -> "Deck A playing"
+                        else -> "Deck B playing"
+                    }
+                    runCatching {
+                        androidx.core.content.ContextCompat.startForegroundService(
+                            this@MainActivity,
+                            android.content.Intent(this@MainActivity, PlaybackService::class.java)
+                                .putExtra(PlaybackService.EXTRA_TEXT, text)
+                        )
+                    }
+                } else {
+                    stopService(android.content.Intent(this@MainActivity, PlaybackService::class.java))
+                }
+            }
+        }
+        // Bring back the last session (tracks, positions, crossfader, sync lock) on a fresh
+        // launch, unless this launch is an "Open with" request.
+        val viewing = savedInstanceState == null && intent?.action == android.content.Intent.ACTION_VIEW
+        if (!viewing && deckA.state.value.uri == null && deckB.state.value.uri == null) restoreSession()
+        // Keep the saved session fresh while the app runs (one small prefs write).
+        lifecycleScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(20_000)
+                saveSession()
+            }
+        }
 
         setContent {
             // Stage 10a: the two adaptive-layout signals, computed once here
@@ -314,20 +353,42 @@ class MainActivity : ComponentActivity() {
                     // regardless of which screen is shown, since they live
                     // in Activity-scoped ViewModels independent of it.
                     var screen by rememberSaveable { mutableStateOf(AppScreen.MIXER) }
+                    val pendingLoad by mixer.pendingLoad.collectAsState()
                     pendingLoad?.let { p ->
                         AlertDialog(
-                            onDismissRequest = { pendingLoad = null },
+                            onDismissRequest = { mixer.setPendingLoad(null) },
                             title = { Text("Load onto Deck ${p.deck.name}?") },
                             text = {
                                 Text("Deck ${p.deck.name} is playing. Loading \"${p.title ?: "this track"}\" will replace what is on it.")
                             },
                             confirmButton = {
                                 TextButton(onClick = {
-                                    deckFor(p.deck).loadTrack(p.uri, p.title)
-                                    pendingLoad = null
+                                    // Re-check the lock: it can change while the dialog is open.
+                                    if (deckFor(p.deck).state.value.isLocked) {
+                                        android.widget.Toast.makeText(this@MainActivity, "Deck ${p.deck.name} is locked", android.widget.Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        deckFor(p.deck).loadTrack(p.uri, p.title)
+                                        libraryViewModel.markPlayedUri(p.uri)
+                                    }
+                                    mixer.setPendingLoad(null)
                                 }) { Text("Load", color = Color(0xFFFF5A7A)) }
                             },
-                            dismissButton = { TextButton(onClick = { pendingLoad = null }) { Text("Cancel") } },
+                            dismissButton = { TextButton(onClick = { mixer.setPendingLoad(null) }) { Text("Cancel") } },
+                        )
+                    }
+                    crashReport?.let { report ->
+                        AlertDialog(
+                            onDismissRequest = { CrashLog.clear(this@MainActivity); crashReport = null },
+                            title = { Text("DJayClone closed unexpectedly last time") },
+                            text = { Text("A short report was saved. Copy it if you want to send it to the developer.") },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                    cm.setPrimaryClip(android.content.ClipData.newPlainText("DJayClone crash report", report))
+                                    CrashLog.clear(this@MainActivity); crashReport = null
+                                }) { Text("Copy") }
+                            },
+                            dismissButton = { TextButton(onClick = { CrashLog.clear(this@MainActivity); crashReport = null }) { Text("Dismiss") } },
                         )
                     }
                     val recUi by recording.state.collectAsState()
@@ -359,6 +420,9 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         AppScreen.MIXER -> {
+                            // Back on the mixer sends the app to the background (decks keep
+                            // playing, as in any music app) instead of ending the set.
+                            BackHandler { moveTaskToBack(true) }
                             MixerScreen(
                                 deckA = deckA,
                                 deckB = deckB,
@@ -393,52 +457,90 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        if (mixer.pendingLoad.value != null) {
+            android.widget.Toast.makeText(this, "Answer the pending load first", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
         handleViewIntent(intent)
     }
 
+    override fun onStop() {
+        // Never lose the last edit or the session to a kill while backgrounded.
+        deckA.flushPersist()
+        deckB.flushPersist()
+        saveSession()
+        super.onStop()
+    }
+
     override fun onDestroy() {
-        audioFocusRequest?.let {
-            (getSystemService(AUDIO_SERVICE) as android.media.AudioManager).abandonAudioFocusRequest(it)
+        // A rotate/fold recreation keeps the same audio session: only a real exit lets go.
+        if (!isChangingConfigurations) {
+            audioFocusRequest?.let {
+                (getSystemService(AUDIO_SERVICE) as android.media.AudioManager).abandonAudioFocusRequest(it)
+            }
+            focusHeld = false
+            PlaybackBridge.pauseAll = null
+            stopService(android.content.Intent(this, PlaybackService::class.java))
         }
         super.onDestroy()
     }
 
-    /** Requested ONCE for the whole app, covering both decks together - not
-     * per-deck. Each DeckViewModel's ExoPlayer has handleAudioFocus=false
-     * specifically so this is the only thing managing focus; two independent
-     * per-instance focus requests would make starting Deck B steal focus
-     * from (and pause/duck) Deck A, breaking simultaneous two-deck mixing.
-     * On a real interruption (phone call, another app taking over) both
-     * decks pause together, same as a single-player app would - correct
-     * behavior for the whole mix, and required for well-behaved audio
-     * routing on Bluetooth/Android Auto/car head units, which generally
-     * expect an app to participate properly in audio focus. */
-    private fun requestAudioFocus() {
+    private fun saveSession() {
+        val a = deckA.state.value
+        val b = deckB.state.value
+        fun deck(st: DeckUiState) = st.uri?.let {
+            DeckSession(it.toString(), st.trackName.takeIf { n -> n.isNotBlank() }, st.positionMs, st.playbackSpeed)
+        }
+        SessionStore.get(application).save(SessionSnapshot(deck(a), deck(b), mixer.crossfader.value, mixer.syncLock.value))
+    }
+
+    private fun restoreSession() {
+        if (!settingsRepo.settings.value.restoreSession) return
+        val snap = SessionStore.get(application).load() ?: return
+        // A track whose file or permission has gone is skipped rather than shown as a failed load.
+        fun readable(uri: Uri): Boolean = runCatching { contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false }.getOrDefault(false)
+        snap.deckA?.let { d -> val u = Uri.parse(d.uri); if (readable(u)) deckA.loadTrack(u, d.title, d.positionMs, d.speed) }
+        snap.deckB?.let { d -> val u = Uri.parse(d.uri); if (readable(u)) deckB.loadTrack(u, d.title, d.positionMs, d.speed) }
+        mixer.setCrossfader(snap.crossfader)
+        mixer.setSyncLock(snap.syncLock)
+    }
+
+    /** One focus request for the whole app, covering both decks together - not per-deck. Each
+     * DeckViewModel's ExoPlayer has handleAudioFocus=false specifically so this is the only thing
+     * managing focus; two per-player requests would make starting Deck B steal focus from (and
+     * pause) Deck A. It is asked for when a deck STARTS PLAYING (not at launch, so opening the app
+     * no longer interrupts the user's music), and asked for again after a loss. On a real
+     * interruption (a call, another app taking over) both decks pause together. */
+    private var focusHeld = false
+
+    private fun ensureAudioFocus() {
+        if (focusHeld) return
         val audioManager = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
-        val attrs = android.media.AudioAttributes.Builder()
-            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
-            .build()
-        val request = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
-            .setAudioAttributes(attrs)
+        val request = audioFocusRequest ?: android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            )
             .setOnAudioFocusChangeListener { focusChange ->
                 when (focusChange) {
                     android.media.AudioManager.AUDIOFOCUS_LOSS,
                     android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                        // Pause both decks rather than duck - a DJ mixer
-                        // partially ducking under a notification sound would
-                        // be a worse experience than just pausing outright,
-                        // and there's no safe "auto-resume" moment to pick.
+                        // Pause both decks rather than duck: a DJ mixer partially ducking under a
+                        // notification would be worse than pausing, and there is no safe
+                        // auto-resume moment. The next Play asks for focus again.
+                        focusHeld = false
                         if (deckA.player.isPlaying) deckA.player.pause()
                         if (deckB.player.isPlaying) deckB.player.pause()
                     }
-                    // AUDIOFOCUS_GAIN: deliberately no auto-resume - the DJ
-                    // decides when to resume, not the OS.
+                    // AUDIOFOCUS_GAIN: deliberately no auto-resume - the DJ decides when to resume.
                 }
             }
             .build()
         audioFocusRequest = request
-        audioManager.requestAudioFocus(request)
+        focusHeld = audioManager.requestAudioFocus(request) == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     }
 
     private fun handleViewIntent(intent: android.content.Intent?) {
@@ -842,6 +944,14 @@ private fun DeckGlancePane(
                 maxLines = 1, style = MaterialTheme.typography.labelSmall
             )
         }
+        IconButton(onClick = { deck.setLocked(!state.isLocked) }, modifier = Modifier.size(32.dp)) {
+            Icon(
+                if (state.isLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                contentDescription = if (state.isLocked) "Unlock deck" else "Lock deck",
+                tint = if (state.isLocked) accent else Color.Gray,
+                modifier = Modifier.size(18.dp)
+            )
+        }
 
         DeckErrorBanner(state = state, deck = deck)
         // The waveform covers the analysed span (up to 3 min), not always the whole track.
@@ -1026,7 +1136,7 @@ private fun MixerArrangementCompact(
             val tolerance = settings.tempoSyncConfig.ratioToleranceFraction
             TextButton(
                 onClick = { onSyncLockChange(if (syncLock == "B_FOLLOWS_A") null else "B_FOLLOWS_A") },
-                enabled = canSync,
+                enabled = canSync && !stateB.isLocked,
                 modifier = Modifier.weight(1f)
             ) {
                 val suffix = if (syncLock == "B_FOLLOWS_A") {
@@ -1054,7 +1164,7 @@ private fun MixerArrangementCompact(
 
             TextButton(
                 onClick = { onSyncLockChange(if (syncLock == "A_FOLLOWS_B") null else "A_FOLLOWS_B") },
-                enabled = canSync,
+                enabled = canSync && !stateA.isLocked,
                 modifier = Modifier.weight(1f)
             ) {
                 val suffix = if (syncLock == "A_FOLLOWS_B") {
@@ -1197,7 +1307,7 @@ private fun MixerArrangementMedium(
             val tolerance = settings.tempoSyncConfig.ratioToleranceFraction
             TextButton(
                 onClick = { onSyncLockChange(if (syncLock == "B_FOLLOWS_A") null else "B_FOLLOWS_A") },
-                enabled = canSync,
+                enabled = canSync && !stateB.isLocked,
                 modifier = Modifier.weight(1f)
             ) {
                 val suffix = if (syncLock == "B_FOLLOWS_A") {
@@ -1225,7 +1335,7 @@ private fun MixerArrangementMedium(
 
             TextButton(
                 onClick = { onSyncLockChange(if (syncLock == "A_FOLLOWS_B") null else "A_FOLLOWS_B") },
-                enabled = canSync,
+                enabled = canSync && !stateA.isLocked,
                 modifier = Modifier.weight(1f)
             ) {
                 val suffix = if (syncLock == "A_FOLLOWS_B") {
@@ -1444,7 +1554,7 @@ private fun CenterMixColumn(
 
         TextButton(
             onClick = { onSyncLockChange(if (syncLock == "B_FOLLOWS_A") null else "B_FOLLOWS_A") },
-            enabled = canSync,
+            enabled = canSync && !stateB.isLocked,
             modifier = Modifier.fillMaxWidth()
         ) {
             val suffix = if (syncLock == "B_FOLLOWS_A") {
@@ -1470,7 +1580,7 @@ private fun CenterMixColumn(
         }
         TextButton(
             onClick = { onSyncLockChange(if (syncLock == "A_FOLLOWS_B") null else "A_FOLLOWS_B") },
-            enabled = canSync,
+            enabled = canSync && !stateA.isLocked,
             modifier = Modifier.fillMaxWidth()
         ) {
             val suffix = if (syncLock == "A_FOLLOWS_B") {
@@ -1518,9 +1628,9 @@ private fun CenterMixColumn(
  */
 @Composable
 private fun RecordRow(state: RecordingUiState, recording: RecordingViewModel, onStart: () -> Unit) {
-    var showRationale by remember { mutableStateOf(false) }
+    var showRationale by rememberSaveable { mutableStateOf(false) }
     var stopArmedAt by remember { mutableStateOf<Long?>(null) }
-    var confirmDiscard by remember { mutableStateOf(false) }
+    var confirmDiscard by rememberSaveable { mutableStateOf(false) }
     // The "tap again" prompt reverts by itself after its window.
     LaunchedEffect(stopArmedAt) {
         val armed = stopArmedAt ?: return@LaunchedEffect
@@ -1845,7 +1955,7 @@ private fun DeckColumnCompact(
  */
 @Composable
 private fun DeckBpmKeyRow(state: DeckUiState, deck: DeckViewModel, accent: Color, style: TextStyle, modifier: Modifier = Modifier) {
-    var showBpmDialog by remember { mutableStateOf(false) }
+    var showBpmDialog by rememberSaveable { mutableStateOf(false) }
     if (showBpmDialog) BpmDialog(state = state, deck = deck, accent = accent, onDismiss = { showBpmDialog = false })
     Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
@@ -2082,12 +2192,16 @@ private fun DeckColumnExpanded(
 @Composable
 private fun LevelMeter(deck: DeckViewModel, color: Color, modifier: Modifier = Modifier) {
     var level by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(deck) {
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(deck, lifecycleOwner) {
+        // Only while the app is on screen: a stopped Activity should not wake the CPU 15x a second.
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
         while (isActive) {
             // A paused or ended deck processes no audio, so the processor's last
             // block would otherwise stay pinned on the meter.
             level = if (deck.player.isPlaying) deck.currentLevel else 0f
             delay(66L)
+        }
         }
     }
     Canvas(modifier = modifier.width(14.dp)) {

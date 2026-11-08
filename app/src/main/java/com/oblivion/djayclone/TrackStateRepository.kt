@@ -33,9 +33,22 @@ class TrackStateRepository private constructor(app: Application) {
 
     fun count(): Int = prefs.all.size
 
-    /** Forget every saved cue/loop for every track. */
-    fun clearAll() {
-        prefs.edit().clear().apply()
+    /** How many tracks have saved cues, hot cues or a loop (a record that only holds a corrected BPM does not count). */
+    fun countWithCues(): Int = prefs.all.values.count { v ->
+        val d = (v as? String)?.let { TrackStateCodec.decode(it) }
+        d != null && TrackStateCodec.withoutCues(d) != d
+    }
+
+    /** Forget every saved cue, hot cue and loop. A hand-corrected BPM is a separate
+     * thing the DJ typed in, so it stays. */
+    fun clearCuesAndLoops() {
+        val editor = prefs.edit()
+        for ((key, v) in prefs.all) {
+            val d = (v as? String)?.let { TrackStateCodec.decode(it) }
+            val kept = d?.let { TrackStateCodec.withoutCues(it) }
+            if (kept == null) editor.remove(key) else editor.putString(key, TrackStateCodec.encode(kept))
+        }
+        editor.apply()
     }
 
     companion object {

@@ -8,10 +8,12 @@
          djayclone_track_state would put one song's hot cues on another, and
          restored manual-import URIs have no grant behind them. -->
         <exclude domain="sharedpref" path="djayclone_track_state.xml" />
+        <exclude domain="sharedpref" path="djayclone_session.xml" />
         <exclude domain="sharedpref" path="djayclone_track_cache.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="djayclone_track_state.xml" />
+        <exclude domain="sharedpref" path="djayclone_session.xml" />
         <exclude domain="sharedpref" path="djayclone_track_cache.xml" />
     </device-transfer>
 </data-extraction-rules>

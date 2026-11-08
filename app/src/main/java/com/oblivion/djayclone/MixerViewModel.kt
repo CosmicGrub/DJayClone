@@ -29,6 +29,10 @@ import kotlinx.coroutines.launch
  * The maths lives in [MixerMath] / [SyncController] (pure, JVM-tested); this
  * class is only state plumbing.
  */
+/** A load waiting on the DJ's confirmation (kept here, not in the Activity, so a rotate or fold
+ * does not silently drop the dialog). */
+data class PendingLoad(val deck: Deck, val uri: android.net.Uri, val title: String?)
+
 class MixerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val settingsRepository = SettingsRepository.get(application)
@@ -44,6 +48,10 @@ class MixerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _syncRatioMode = MutableStateFlow(SyncRatioMode.AUTO)
     val syncRatioMode: StateFlow<SyncRatioMode> = _syncRatioMode.asStateFlow()
+
+    private val _pendingLoad = MutableStateFlow<PendingLoad?>(null)
+    val pendingLoad: StateFlow<PendingLoad?> = _pendingLoad.asStateFlow()
+    fun setPendingLoad(p: PendingLoad?) { _pendingLoad.value = p }
 
     fun setCrossfader(x: Float) { _crossfader.value = x.coerceIn(0f, 1f) }
     fun setSyncLock(lock: String?) { _syncLock.value = lock }
@@ -94,12 +102,16 @@ class MixerViewModel(application: Application) : AndroidViewModel(application) {
                 _syncLock,
                 _syncRatioMode,
                 settingsRepository.settings.map { it.tempoSyncConfig.ratioToleranceFraction }.distinctUntilChanged(),
-                deckA.state.map { it.bpm to it.playbackSpeed }.distinctUntilChanged(),
-                deckB.state.map { it.bpm to it.playbackSpeed }.distinctUntilChanged(),
+                deckA.state.map { Triple(it.bpm, it.playbackSpeed, it.isLocked) }.distinctUntilChanged(),
+                deckB.state.map { Triple(it.bpm, it.playbackSpeed, it.isLocked) }.distinctUntilChanged(),
             ) { lock, mode, tol, a, b ->
                 SyncController.compute(lock, mode, tol, a.first, b.first, a.second, b.second)
             }.collect { target ->
-                if (target != null) (if (target.followerIsA) deckA else deckB).setPlaybackSpeed(target.speed)
+                if (target != null) {
+                    val follower = if (target.followerIsA) deckA else deckB
+                    // A locked deck keeps its tempo; sync waits until it is unlocked.
+                    if (!follower.state.value.isLocked) follower.setPlaybackSpeed(target.speed)
+                }
             }
         }
     }

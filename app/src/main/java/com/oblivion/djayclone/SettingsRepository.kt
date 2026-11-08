@@ -63,6 +63,8 @@ data class AppSettings(
     // Pause both decks when headphones/Bluetooth/USB output disconnects, so the
     // cue feed never jumps to the speaker at full volume.
     val pauseOnOutputLoss: Boolean = true,
+    // Bring back the tracks, positions, crossfader and sync lock from the last session on launch.
+    val restoreSession: Boolean = true,
     // Tempo fader: full-scale range in percent (TempoFaderMath.ALLOWED_RANGES) and direction.
     val tempoRangePercent: Int = 8,
     val tempoFaderInverted: Boolean = false,
@@ -164,6 +166,7 @@ class SettingsRepository private constructor(app: Application) {
             showTimeRemaining = prefs.getBoolean(KEY_TIME_REMAINING, d.showTimeRemaining),
             keepScreenOn = prefs.getBoolean(KEY_KEEP_SCREEN_ON, d.keepScreenOn),
             pauseOnOutputLoss = prefs.getBoolean(KEY_PAUSE_ON_OUTPUT_LOSS, d.pauseOnOutputLoss),
+            restoreSession = prefs.getBoolean(KEY_RESTORE_SESSION, d.restoreSession),
             tempoRangePercent = TempoFaderMath.coerceRange(prefs.getInt(KEY_TEMPO_RANGE, d.tempoRangePercent)),
             tempoFaderInverted = prefs.getBoolean(KEY_TEMPO_INVERTED, d.tempoFaderInverted),
             confirmLoadOnPlayingDeck = prefs.getBoolean(KEY_CONFIRM_LOAD, d.confirmLoadOnPlayingDeck),
@@ -226,6 +229,11 @@ class SettingsRepository private constructor(app: Application) {
     fun setPauseOnOutputLoss(on: Boolean) {
         prefs.edit().putBoolean(KEY_PAUSE_ON_OUTPUT_LOSS, on).apply()
         _settings.value = _settings.value.copy(pauseOnOutputLoss = on)
+    }
+
+    fun setRestoreSession(on: Boolean) {
+        prefs.edit().putBoolean(KEY_RESTORE_SESSION, on).apply()
+        _settings.value = _settings.value.copy(restoreSession = on)
     }
 
     fun setTempoRangePercent(pct: Int) {
@@ -313,6 +321,7 @@ class SettingsRepository private constructor(app: Application) {
         private const val KEY_TIME_REMAINING = "show_time_remaining"
         private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
         private const val KEY_PAUSE_ON_OUTPUT_LOSS = "pause_on_output_loss"
+        private const val KEY_RESTORE_SESSION = "restore_session"
         private const val KEY_TEMPO_RANGE = "tempo_range_percent"
         private const val KEY_TEMPO_INVERTED = "tempo_fader_inverted"
         private const val KEY_CONFIRM_LOAD = "confirm_load_on_playing"

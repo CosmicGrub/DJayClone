@@ -276,6 +276,7 @@ class RecordingService : Service() {
             var lastPatchBytes = 0L
             var lastSync = SystemClock.elapsedRealtime()
             var gaps = 0
+            var lastPublishedSecond = -1L
             val zeros = ByteArray(16384)
             fun patch() {
                 raf.seek(0)
@@ -299,8 +300,12 @@ class RecordingService : Service() {
                     val take = minOf(buf.size.toLong(), room).toInt()
                     if (take > 0) raf.write(buf, 0, take)
                     dataBytes += take
-                    _state.update {
-                        it.copy(elapsedMs = CaptureClock.elapsedMs(dataBytes / blockAlign, rate), gapCount = gaps)
+                    // Publish once a second (and on a new glitch): per-buffer updates made the whole
+                    // UI recompose 25-50 times a second for a clock that shows whole seconds.
+                    val elapsed = CaptureClock.elapsedMs(dataBytes / blockAlign, rate)
+                    if (elapsed / 1000 != lastPublishedSecond || gaps != _state.value.gapCount) {
+                        lastPublishedSecond = elapsed / 1000
+                        _state.update { it.copy(elapsedMs = elapsed, gapCount = gaps) }
                     }
                     if (dataBytes - lastPatchBytes >= 2 * bytesPerSec) {
                         patch(); lastPatchBytes = dataBytes

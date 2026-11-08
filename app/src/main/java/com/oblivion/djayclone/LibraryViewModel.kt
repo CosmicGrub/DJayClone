@@ -112,6 +112,10 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         refresh()
     }
 
+    fun markPlayedUri(uri: Uri) {
+        cache.setLastPlayed(TrackId.from(uri), System.currentTimeMillis())
+    }
+
     fun markPlayed(track: LibraryTrack) {
         cache.setLastPlayed(track.id, System.currentTimeMillis())
     }

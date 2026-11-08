@@ -1,6 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// Real release signing. keystore.properties (git-ignored) points at the
+// keystore kept outside the repo; without it the release build falls back to
+// the debug key so a fresh clone still builds.
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -17,8 +27,8 @@ android {
         applicationId = "com.oblivion.djayclone"
         minSdk = 26
         targetSdk = 34
-        versionCode = 22
-        versionName = "0.18.1" // Stages 1-10c complete: playback, mixing, BPM sync,
+        versionCode = 23
+        versionName = "0.19.0" // Stages 1-10c complete: playback, mixing, BPM sync,
         // cue/loop/hot-cues, live-mix recording + export, filter/echo FX,
         // adjustable settings, track library, adaptive tablet/foldable
         // layout including the TableTop posture-aware arrangement (the one
@@ -30,16 +40,25 @@ android {
         // separate trim from the GAIN fader), and exact MP3 seeking.
     }
 
+    signingConfigs {
+        if (keystoreProps.getProperty("storeFile") != null) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
-            // Signed with the debug key so `assembleRelease` produces an
-            // APK you can actually install directly (adb install / sideload)
-            // for daily personal use, rather than an unsigned artifact that
-            // needs a real release keystore before it'll install at all.
-            // Fine for a personal project that isn't going to the Play
-            // Store; revisit if that ever changes.
-            signingConfig = signingConfigs.getByName("debug")
+            // R8 + resource shrinking: the unminified dex was about 47 MB (mostly the
+            // extended icon set and unused Compose/Media3 code), which slows cold start.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
@@ -86,7 +105,6 @@ dependencies {
     // Media3 (ExoPlayer) - broad codec support (MP3, AAC, FLAC, WAV, OGG, OPUS)
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
-    implementation("androidx.media3:media3-session:1.4.1")
 
     // Stage 10: adaptive layout (tablet/foldable). One first-party artifact
     // covers both signals - WindowSizeClass (how much room) and
